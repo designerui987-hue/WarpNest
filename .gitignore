@@ -1,0 +1,25 @@
+# Xcode & Swift
+.DS_Store
+*/.DS_Store
+*.swp
+*~.nib
+build/
+DerivedData/
+.build/
+*.xcuserstate
+project.xcworkspace/xcuserdata/
+*.xcuserdatad/
+*.moved-aside
+
+# App Data & User Test Data
+WarpNestAppData/
+WineRuntimes/
+TestBottles/
+*.log
+*.zip
+*.tar.xz
+*.tar.gz
+
+# Antigravity artifacts
+.gemini/
+.agents/
