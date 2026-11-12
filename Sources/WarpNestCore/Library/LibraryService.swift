@@ -9,6 +9,7 @@ public enum LibraryServiceError: Error, LocalizedError, Sendable {
     case launchFailed(String)
     case alreadyRunning(GameID)
     case runtimeUnavailable(String)
+    case bottleBusy(BottleID, String)
 
     public var errorDescription: String? {
         switch self {
@@ -19,6 +20,7 @@ public enum LibraryServiceError: Error, LocalizedError, Sendable {
         case .launchFailed(let reason): return "Failed to launch game: \(reason)"
         case .alreadyRunning(let id): return "Game '\(id)' is already running."
         case .runtimeUnavailable(let msg): return "Runtime is unavailable: \(msg)"
+        case .bottleBusy(let id, let reason): return "Bottle '\(id)' cannot start game: \(reason)"
         }
     }
 }
@@ -45,10 +47,19 @@ public actor LibraryService {
     private var games: [GameID: GameItem] = [:]
     private var activeSessions: [GameID: ActiveSession] = [:]
     private var logBuffers: [GameID: LogRingBuffer] = [:]
+    private var stateListeners: [GameID: @Sendable (SessionState) -> Void] = [:]
 
     public init(metadataStore: MetadataStore, bottleService: BottleService) {
         self.metadataStore = metadataStore
         self.bottleService = bottleService
+    }
+
+    public func setStateListener(for id: GameID, listener: (@Sendable (SessionState) -> Void)?) {
+        stateListeners[id] = listener
+    }
+
+    public func notifyStateChange(for id: GameID, state: SessionState) {
+        stateListeners[id]?(state)
     }
 
     public func loadGames() async throws -> [GameItem] {
@@ -68,17 +79,26 @@ public actor LibraryService {
         name: String,
         bottleID: BottleID,
         executableRelativePath: String,
+        workingDirectoryRelativePath: String? = nil,
         arguments: [String] = [],
         environmentOverrides: [String: String] = [:]
     ) async throws -> GameItem {
-        guard await bottleService.getBottle(id: bottleID) != nil else {
+        guard let bottle = await bottleService.getBottle(id: bottleID) else {
             throw LibraryServiceError.bottleNotFound(bottleID)
+        }
+
+        // Validate executable file existence inside bottle prefix
+        let bottleURL = URL(fileURLWithPath: bottle.directoryPath)
+        let fullExeURL = bottleURL.appendingPathComponent(executableRelativePath)
+        guard FileManager.default.fileExists(atPath: fullExeURL.path) else {
+            throw LibraryServiceError.executableNotFound(fullExeURL.path)
         }
 
         let newGame = GameItem(
             name: name.trimmingCharacters(in: .whitespacesAndNewlines),
             bottleID: bottleID,
             executableRelativePath: executableRelativePath,
+            workingDirectoryRelativePath: workingDirectoryRelativePath,
             arguments: arguments,
             environmentOverrides: environmentOverrides
         )
@@ -98,6 +118,7 @@ public actor LibraryService {
         }
         games.removeValue(forKey: id)
         logBuffers.removeValue(forKey: id)
+        stateListeners.removeValue(forKey: id)
         try await persistGames()
     }
 
@@ -140,8 +161,16 @@ public actor LibraryService {
             throw LibraryServiceError.runtimeUnavailable("Runtime adapter not registered for \(bottle.runtimeID)")
         }
 
+        // Lock bottle for this active running game session!
+        do {
+            try await bottleService.lockBottle(id: game.bottleID, reason: "Game session '\(game.name)' is running")
+        } catch {
+            throw LibraryServiceError.bottleBusy(game.bottleID, "Bottle is currently locked by another operation")
+        }
+
+        notifyStateChange(for: id, state: .preparing)
         let buffer = getLogBuffer(for: id)
-        buffer.append("[LAUNCH] Starting launch sequence for '\(game.name)'...")
+        buffer.append("[LAUNCH] Starting launch sequence for '\(game.name)' in bottle '\(bottle.name)'...")
 
         let bottleURL = URL(fileURLWithPath: bottle.directoryPath)
         let execPlan = try adapter.buildExecutionPlan(
@@ -150,6 +179,15 @@ public actor LibraryService {
             arguments: game.arguments,
             configuration: bottle.configuration
         )
+
+        // Resolve working directory: user override, or folder containing executable, or drive_c
+        let resolvedWorkingDir: URL
+        if let customWorkingRel = game.workingDirectoryRelativePath, !customWorkingRel.isEmpty {
+            resolvedWorkingDir = bottleURL.appendingPathComponent(customWorkingRel)
+        } else {
+            let exeURL = bottleURL.appendingPathComponent(game.executableRelativePath)
+            resolvedWorkingDir = exeURL.deletingLastPathComponent()
+        }
 
         let supervisor = ProcessSupervisor(logBuffer: buffer)
         let session = ActiveSession(gameID: id, bottleID: game.bottleID, supervisor: supervisor)
@@ -162,15 +200,17 @@ public actor LibraryService {
 
         Task { [weak self] in
             do {
+                await self?.notifyStateChange(for: id, state: .running)
                 let status = try await supervisor.launch(
                     executableURL: execPlan.executableURL,
                     arguments: execPlan.arguments,
-                    workingDirectory: bottleURL,
+                    workingDirectory: resolvedWorkingDir,
                     environment: env
                 )
                 await self?.handleGameExit(id: id, status: status)
             } catch {
                 buffer.append("[LAUNCH ERROR] \(error.localizedDescription)")
+                await self?.notifyStateChange(for: id, state: .failed)
                 await self?.handleGameExit(id: id, status: ProcessExitStatus(exitCode: -1))
             }
         }
@@ -182,24 +222,35 @@ public actor LibraryService {
         try? await persistGames()
     }
 
-    private func handleGameExit(id: GameID, status: ProcessExitStatus) {
+    private func handleGameExit(id: GameID, status: ProcessExitStatus) async {
         if let session = activeSessions[id] {
             let duration = Date().timeIntervalSince(session.startedAt)
             if var game = games[id] {
                 game.totalPlayTimeSeconds += duration
                 games[id] = game
-                Task {
-                    try? await persistGames()
-                }
+                try? await persistGames()
             }
+            // Unlock bottle now that the game has exited
+            await bottleService.unlockBottle(id: session.bottleID)
         }
         activeSessions.removeValue(forKey: id)
+        notifyStateChange(for: id, state: status.exitCode == 0 ? .stopped : .failed)
     }
 
-    /// Stops a running game session safely.
+    /// Stops a running game session and stops associated prefix services (wineserver -k).
     public func stopGame(id: GameID) async {
         guard let session = activeSessions[id] else { return }
+        notifyStateChange(for: id, state: .stopping)
         await session.supervisor.terminate()
+
+        if let bottle = await bottleService.getBottle(id: session.bottleID),
+           let adapter = await bottleService.getAdapter(for: bottle.runtimeID) {
+            let bottleURL = URL(fileURLWithPath: bottle.directoryPath)
+            try? await adapter.stopPrefix(at: bottleURL)
+        }
+
+        await bottleService.unlockBottle(id: session.bottleID)
         activeSessions.removeValue(forKey: id)
+        notifyStateChange(for: id, state: .stopped)
     }
 }

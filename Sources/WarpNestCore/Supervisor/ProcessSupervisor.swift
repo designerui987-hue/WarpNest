@@ -5,18 +5,29 @@ public final class LogRingBuffer: @unchecked Sendable {
     private let lock = NSLock()
     private var lines: [String] = []
     public let maxCapacity: Int
+    private var onLineAdded: (@Sendable (String) -> Void)?
 
-    public init(maxCapacity: Int = 2000) {
+    public init(maxCapacity: Int = 2000, onLineAdded: (@Sendable (String) -> Void)? = nil) {
         self.maxCapacity = maxCapacity
+        self.onLineAdded = onLineAdded
+    }
+
+    public func setLineHandler(_ handler: (@Sendable (String) -> Void)?) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.onLineAdded = handler
     }
 
     public func append(_ line: String) {
+        let handler: (@Sendable (String) -> Void)?
         lock.lock()
-        defer { lock.unlock() }
         lines.append(line)
         if lines.count > maxCapacity {
             lines.removeFirst(lines.count - maxCapacity)
         }
+        handler = onLineAdded
+        lock.unlock()
+        handler?(line)
     }
 
     public func getAllLines() -> [String] {
@@ -79,6 +90,7 @@ public actor ProcessSupervisor {
     private let logBuffer: LogRingBuffer
     private var terminationContinuation: CheckedContinuation<ProcessExitStatus, Never>?
     private var cancelled: Bool = false
+    private var activePID: Int32?
 
     public init(logBuffer: LogRingBuffer = LogRingBuffer()) {
         self.logBuffer = logBuffer
@@ -89,8 +101,7 @@ public actor ProcessSupervisor {
     }
 
     public var processIdentifier: Int32? {
-        guard let p = process, p.isRunning else { return nil }
-        return p.processIdentifier
+        activePID
     }
 
     /// Launches an executable with explicit arguments, working directory, and environment.
@@ -102,7 +113,7 @@ public actor ProcessSupervisor {
         environment: [String: String] = [:]
     ) async throws -> ProcessExitStatus {
         guard !isRunning else {
-            throw ProcessSupervisorError.processAlreadyRunning(process?.processIdentifier ?? -1)
+            throw ProcessSupervisorError.processAlreadyRunning(activePID ?? -1)
         }
 
         guard FileManager.default.fileExists(atPath: executableURL.path) else {
@@ -139,7 +150,7 @@ public actor ProcessSupervisor {
                     buffer.append("[STDOUT] " + line)
                 }
             } catch {
-                // Pipe closed
+                // Pipe finished
             }
         }
 
@@ -151,7 +162,7 @@ public actor ProcessSupervisor {
                     buffer.append("[STDERR] " + line)
                 }
             } catch {
-                // Pipe closed
+                // Pipe finished
             }
         }
 
@@ -159,9 +170,11 @@ public actor ProcessSupervisor {
 
         do {
             try p.run()
+            self.activePID = p.processIdentifier
             buffer.append("[SUPERVISOR] Process started with PID: \(p.processIdentifier)")
         } catch {
             self.process = nil
+            self.activePID = nil
             buffer.append("[SUPERVISOR] Failed to launch: \(error.localizedDescription)")
             throw ProcessSupervisorError.executionFailed(error.localizedDescription)
         }
@@ -176,23 +189,27 @@ public actor ProcessSupervisor {
         }
     }
 
-    private func handleTermination(exitCode: Int32) {
+    private func handleTermination(exitCode: Int32) async {
+        // Wait briefly for stdout and stderr pipe tasks to complete draining final lines
+        _ = await stdoutTask?.result
+        _ = await stderrTask?.result
+
         logBuffer.append("[SUPERVISOR] Process exited with status code: \(exitCode)")
         let status = ProcessExitStatus(exitCode: exitCode, wasCancelled: self.cancelled)
         terminationContinuation?.resume(returning: status)
         terminationContinuation = nil
         process = nil
-        stdoutTask?.cancel()
-        stderrTask?.cancel()
+        activePID = nil
         stdoutTask = nil
         stderrTask = nil
     }
 
-    /// Gracefully requests termination via SIGTERM, then forces SIGKILL if still running.
+    /// Gracefully requests termination via SIGTERM, then forces SIGKILL (and process group kill) if still running.
     public func terminate() async {
         guard let p = process, p.isRunning else { return }
         cancelled = true
-        logBuffer.append("[SUPERVISOR] Terminating process (PID: \(p.processIdentifier))...")
+        let pid = p.processIdentifier
+        logBuffer.append("[SUPERVISOR] Terminating process (PID: \(pid))...")
         p.terminate()
 
         // Wait up to 2 seconds for clean exit before forcing
@@ -202,8 +219,10 @@ public actor ProcessSupervisor {
         }
 
         if p.isRunning {
-            logBuffer.append("[SUPERVISOR] Process did not exit gracefully, sending SIGKILL...")
-            kill(p.processIdentifier, SIGKILL)
+            logBuffer.append("[SUPERVISOR] Process did not exit gracefully, sending SIGKILL to process group...")
+            // Kill entire process group if running as group leader, otherwise target PID
+            kill(-pid, SIGKILL)
+            kill(pid, SIGKILL)
         }
     }
 

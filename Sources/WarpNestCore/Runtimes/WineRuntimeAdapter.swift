@@ -1,23 +1,43 @@
 import Foundation
 
-/// Production Wine Runtime Adapter supporting Wine-Staging, WineCX, and custom Wine distributions.
+/// Production Wine Runtime Adapter supporting Wine-Staging, WineCX, and standard macOS Wine distributions.
+/// Represents a real compatibility runtime with lazy verification and true version querying.
 public struct WineRuntimeAdapter: RuntimeAdapter {
-    public let descriptor: RuntimeDescriptor
+    public var descriptor: RuntimeDescriptor
     public let wineExecutableURL: URL
     public let winebootExecutableURL: URL
     public let wineserverExecutableURL: URL
 
+    /// Initializes an adapter for a Wine distribution root.
+    /// Supports both standard UNIX layouts (root/bin/wine) and macOS App bundles (root/Contents/Resources/wine/bin/wine).
     public init(rootDirectory: URL) throws {
-        let binDir = rootDirectory.appendingPathComponent("bin", isDirectory: true)
-        let wineURL = binDir.appendingPathComponent("wine")
+        let fileManager = FileManager.default
+
+        let directBin = rootDirectory.appendingPathComponent("bin", isDirectory: true)
+        let appBundleBin = rootDirectory.appendingPathComponent("Contents/Resources/wine/bin", isDirectory: true)
+
+        let binDir: URL
+        if fileManager.fileExists(atPath: directBin.path) {
+            binDir = directBin
+        } else if fileManager.fileExists(atPath: appBundleBin.path) {
+            binDir = appBundleBin
+        } else {
+            throw RuntimeAdapterError.binaryNotFound(directBin.path)
+        }
+
         let wine64URL = binDir.appendingPathComponent("wine64")
+        let wineURL = binDir.appendingPathComponent("wine")
         let winebootURL = binDir.appendingPathComponent("wineboot")
         let wineserverURL = binDir.appendingPathComponent("wineserver")
 
-        let actualWine = FileManager.default.fileExists(atPath: wine64URL.path) ? wine64URL : wineURL
+        let actualWine = fileManager.fileExists(atPath: wine64URL.path) ? wine64URL : wineURL
 
-        guard FileManager.default.fileExists(atPath: actualWine.path) else {
+        guard fileManager.fileExists(atPath: actualWine.path) else {
             throw RuntimeAdapterError.binaryNotFound(actualWine.path)
+        }
+
+        guard fileManager.isExecutableFile(atPath: actualWine.path) else {
+            throw RuntimeAdapterError.permissionDenied(actualWine.path)
         }
 
         self.wineExecutableURL = actualWine
@@ -25,32 +45,73 @@ public struct WineRuntimeAdapter: RuntimeAdapter {
         self.wineserverExecutableURL = wineserverURL
 
         self.descriptor = RuntimeDescriptor(
-            id: RuntimeID("wine-imported-\(rootDirectory.lastPathComponent)"),
-            name: "Wine Runtime (\(rootDirectory.lastPathComponent))",
-            version: "Wine-Staging / macOS",
+            id: RuntimeID("wine-\(rootDirectory.lastPathComponent)"),
+            name: "Wine (\(rootDirectory.lastPathComponent))",
+            version: "Unknown (Unvalidated)",
             rootPath: rootDirectory.path,
-            isVerified: true,
+            isVerified: false,
+            isSimulation: false,
             supportedArchitectures: ["x86_64", "arm64"],
             supportedGraphicsBackends: [.automatic, .dxvk, .wineD3D]
         )
     }
 
+    /// Validates the runtime by executing `wine --version` with a bounded timeout and checking executable permissions.
     public func validate() async throws -> Bool {
-        guard FileManager.default.fileExists(atPath: wineExecutableURL.path) else {
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: wineExecutableURL.path),
+              fileManager.isExecutableFile(atPath: wineExecutableURL.path) else {
             return false
         }
+
         let supervisor = ProcessSupervisor()
-        do {
-            let status = try await supervisor.launch(
+        let valTask = Task {
+            try await supervisor.launch(
                 executableURL: wineExecutableURL,
                 arguments: ["--version"]
             )
-            return status.exitCode == 0
+        }
+
+        let timeoutTask = Task {
+            try await Task.sleep(nanoseconds: 5_000_000_000)
+            await supervisor.terminate()
+        }
+
+        do {
+            let status = try await valTask.value
+            timeoutTask.cancel()
+            return status.exitCode == 0 && !status.wasCancelled
         } catch {
+            timeoutTask.cancel()
             return false
         }
     }
 
+    /// Queries the actual runtime version string via `wine --version`.
+    public func queryVersion() async -> String? {
+        let buffer = LogRingBuffer()
+        let sup = ProcessSupervisor(logBuffer: buffer)
+        do {
+            let status = try await sup.launch(
+                executableURL: wineExecutableURL,
+                arguments: ["--version"]
+            )
+            if status.exitCode == 0 {
+                let lines = buffer.getAllLines()
+                for line in lines {
+                    if line.starts(with: "[STDOUT] ") {
+                        let ver = String(line.dropFirst(9)).trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !ver.isEmpty { return ver }
+                    }
+                }
+            }
+        } catch {
+            return nil
+        }
+        return nil
+    }
+
+    /// Initializes a wine prefix with a 120-second bounded timeout.
     public func initializePrefix(at prefixURL: URL, configuration: BottleConfiguration, logBuffer: LogRingBuffer) async throws {
         logBuffer.append("[WINE ADAPTER] Initializing wine prefix at: \(prefixURL.path)")
         try FileManager.default.createDirectory(at: prefixURL, withIntermediateDirectories: true)
@@ -68,13 +129,32 @@ public struct WineRuntimeAdapter: RuntimeAdapter {
             env["WINEARCH"] = "win32"
         }
 
-        let status = try await supervisor.launch(
-            executableURL: winebootExecutableURL,
-            arguments: ["-u"],
-            environment: env
-        )
+        let initTask = Task {
+            try await supervisor.launch(
+                executableURL: winebootExecutableURL,
+                arguments: ["-u"],
+                environment: env
+            )
+        }
+
+        let timeoutTask = Task {
+            try await Task.sleep(nanoseconds: 120_000_000_000)
+            await supervisor.terminate()
+        }
+
+        let status: ProcessExitStatus
+        do {
+            status = try await initTask.value
+            timeoutTask.cancel()
+        } catch {
+            timeoutTask.cancel()
+            throw error
+        }
 
         guard status.exitCode == 0 else {
+            if status.wasCancelled {
+                throw RuntimeAdapterError.winebootTimedOut
+            }
             throw RuntimeAdapterError.winebootFailed(status.exitCode)
         }
 
@@ -101,17 +181,15 @@ public struct WineRuntimeAdapter: RuntimeAdapter {
             env["WINEMSYNC"] = "1"
         }
 
-        // Configure Graphics Backend
         switch configuration.graphicsBackend {
         case .dxvk:
             env["WINE_D3D_CONFIG"] = "renderer=vulkan"
         case .wineD3D:
             env["WINE_D3D_CONFIG"] = "renderer=gl"
-        case .automatic, .d3dMetal:
+        case .automatic:
             break
         }
 
-        // Apply custom environment variables
         for (k, v) in configuration.environmentVariables {
             env[k] = v
         }

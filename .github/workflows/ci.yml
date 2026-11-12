@@ -13,11 +13,22 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Select Xcode
-      run: sudo xcode-select -s /Applications/Xcode_15.4.app || true
+    - name: Select Xcode 16 / Swift 6 Toolchain
+      run: |
+        if [ -d "/Applications/Xcode_16.0.app" ]; then
+          sudo xcode-select -s /Applications/Xcode_16.0.app
+        elif [ -d "/Applications/Xcode.app" ]; then
+          sudo xcode-select -s /Applications/Xcode.app
+        else
+          echo "::error::Compatible Xcode with Swift 6 not found."
+          exit 1
+        fi
 
     - name: Verify Swift Toolchain
-      run: swift --version
+      run: |
+        swift --version
+        swift_ver=$(swift --version | head -n 1)
+        echo "Active Swift: $swift_ver"
 
     - name: Build Core & App
       run: swift build -v

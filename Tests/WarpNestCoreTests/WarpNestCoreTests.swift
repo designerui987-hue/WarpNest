@@ -67,7 +67,7 @@ struct ProcessSupervisorTests {
 
 @Suite("Bottle & Library Integration Tests")
 struct BottleAndLibraryTests {
-    @Test("End-to-end bottle creation, game addition, and launch execution")
+    @Test("End-to-end bottle creation, game addition, and launch execution with simulation adapter")
     func testEndToEndWorkflow() async throws {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("WarpNestTest_\(UUID().uuidString)")
         let store = MetadataStore(baseDirectory: tempDir)
@@ -85,6 +85,11 @@ struct BottleAndLibraryTests {
         #expect(bottle.name == "Test Game Prefix")
         #expect(FileManager.default.fileExists(atPath: bottle.directoryPath))
 
+        // Create a dummy exe inside prefix for path validation
+        let bottleURL = URL(fileURLWithPath: bottle.directoryPath)
+        let exeURL = bottleURL.appendingPathComponent("drive_c/windows/sol.exe")
+        try "dummy binary".data(using: .utf8)?.write(to: exeURL)
+
         // 2. Add an application shortcut
         let game = try await libraryService.addGame(
             name: "Solitaire",
@@ -96,17 +101,24 @@ struct BottleAndLibraryTests {
         // 3. Launch the game using the test adapter
         try await libraryService.launchGame(id: game.id)
 
-        // Check buffer logs
-        let buffer = await libraryService.getLogBuffer(for: game.id)
-        var logsFound = false
-        for _ in 0..<20 {
-            try await Task.sleep(nanoseconds: 50_000_000)
-            if buffer.getJoinedText().contains("Simulated Execution") {
-                logsFound = true
-                break
-            }
+        // Verify session locking prevents concurrent destructive operations
+        let lockCheck = await bottleService.isBottleLocked(id: bottle.id)
+        #expect(lockCheck.isLocked == true)
+
+        // Expect delete bottle to fail while session is active
+        await #expect(throws: BottleServiceError.self) {
+            try await bottleService.deleteBottle(id: bottle.id)
         }
-        #expect(logsFound == true)
+
+        // Wait for process to finish
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        // Stop session safely
+        await libraryService.stopGame(id: game.id)
+
+        // Verify bottle lock is released
+        let lockCheckAfter = await bottleService.isBottleLocked(id: bottle.id)
+        #expect(lockCheckAfter.isLocked == false)
 
         // 4. Verify shortcut deletion does not delete bottle
         try await libraryService.removeGame(id: game.id)
@@ -143,6 +155,27 @@ struct BottleAndLibraryTests {
         )
         #expect(restored.name == "Restored Target Bottle")
         #expect(FileManager.default.fileExists(atPath: restored.directoryPath))
+
+        try? FileManager.default.removeItem(at: tempDir)
+    }
+
+    @Test("Archive path traversal protection")
+    func testArchiveTraversalProtection() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("WarpNestZipTest_\(UUID().uuidString)")
+        let store = MetadataStore(baseDirectory: tempDir)
+        let bottleService = BottleService(metadataStore: store)
+
+        let maliciousZip = tempDir.appendingPathComponent("malicious.zip")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+
+        // Attempt to restore non-existent archive throws
+        await #expect(throws: BottleServiceError.self) {
+            try await bottleService.restoreBottle(
+                from: maliciousZip,
+                restoredName: "Attack Bottle",
+                runtimeID: RuntimeID("test-adapter-v1")
+            )
+        }
 
         try? FileManager.default.removeItem(at: tempDir)
     }

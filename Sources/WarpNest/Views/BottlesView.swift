@@ -5,6 +5,10 @@ struct BottlesView: View {
     @Bindable var viewModel: AppViewModel
     @State private var showingCreateBottleSheet = false
     @State private var newBottleName = ""
+    @State private var selectedRuntimeID: RuntimeID?
+    @State private var syncBackend: SyncBackend = .esync
+    @State private var is64Bit: Bool = true
+    @State private var createError: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -16,6 +20,7 @@ struct BottlesView: View {
                 Spacer()
 
                 Button {
+                    createError = nil
                     showingCreateBottleSheet = true
                 } label: {
                     Label("New Bottle", systemImage: "plus")
@@ -38,10 +43,21 @@ struct BottlesView: View {
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 400)
+
+                    if viewModel.registeredRuntimes.isEmpty {
+                        Text("No verified compatibility runtimes found. Please import a Wine runtime or enable Developer Mode in Settings.")
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal)
+                    }
+
                     Button("Create First Bottle") {
+                        createError = nil
                         showingCreateBottleSheet = true
                     }
                     .buttonStyle(.borderedProminent)
+                    .disabled(viewModel.registeredRuntimes.isEmpty)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -51,7 +67,7 @@ struct BottlesView: View {
                             Text(bottle.name)
                                 .font(.headline)
                             Spacer()
-                            Text(bottle.configuration.graphicsBackend.displayName)
+                            Text(bottle.configuration.syncBackend.rawValue)
                                 .font(.caption)
                                 .padding(4)
                                 .background(Color.secondary.opacity(0.15))
@@ -67,10 +83,15 @@ struct BottlesView: View {
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
                             Spacer()
+
                             Button("Delete", role: .destructive) {
                                 Task {
-                                    try? await viewModel.bottleService.deleteBottle(id: bottle.id)
-                                    await viewModel.reloadData()
+                                    do {
+                                        try await viewModel.bottleService.deleteBottle(id: bottle.id)
+                                        await viewModel.reloadData()
+                                    } catch {
+                                        viewModel.showError("Cannot delete bottle: \(error.localizedDescription)")
+                                    }
                                 }
                             }
                             .buttonStyle(.borderless)
@@ -89,23 +110,85 @@ struct BottlesView: View {
                 TextField("Bottle Name (e.g. Steam Games)", text: $newBottleName)
                     .textFieldStyle(.roundedBorder)
 
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Compatibility Runtime")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    if viewModel.registeredRuntimes.isEmpty {
+                        Text("No verified runtimes registered. Install Wine or enable Developer Mode.")
+                            .font(.caption)
+                            .foregroundColor(.red)
+                    } else {
+                        Picker("Runtime", selection: $selectedRuntimeID) {
+                            Text("Select runtime...").tag(nil as RuntimeID?)
+                            ForEach(viewModel.registeredRuntimes) { r in
+                                Text("\(r.name) (\(r.version))\(r.isSimulation ? " [SIMULATED]" : "")")
+                                    .tag(r.id as RuntimeID?)
+                            }
+                        }
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Threading Synchronization")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Picker("Sync Backend", selection: $syncBackend) {
+                        ForEach(SyncBackend.allCases, id: \.self) { backend in
+                            Text(backend.rawValue).tag(backend)
+                        }
+                    }
+                }
+
+                Toggle("64-bit Architecture (WoW64)", isOn: $is64Bit)
+
+                if let err = createError {
+                    Text(err)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+
                 HStack {
                     Spacer()
                     Button("Cancel") {
                         showingCreateBottleSheet = false
                     }
                     Button("Create") {
+                        let targetRuntimeID = selectedRuntimeID ?? viewModel.registeredRuntimes.first?.id
+                        guard let runtimeID = targetRuntimeID else {
+                            createError = "Please select a verified runtime."
+                            return
+                        }
+
+                        let config = BottleConfiguration(
+                            win64: is64Bit,
+                            graphicsBackend: .automatic,
+                            syncBackend: syncBackend,
+                            highResolutionMode: viewModel.appSettings.defaultHighResolutionMode
+                        )
+
                         Task {
-                            try? await viewModel.createBottle(name: newBottleName.isEmpty ? "New Bottle" : newBottleName)
-                            showingCreateBottleSheet = false
-                            newBottleName = ""
+                            do {
+                                try await viewModel.createBottle(
+                                    name: newBottleName.isEmpty ? "New Bottle" : newBottleName,
+                                    runtimeID: runtimeID,
+                                    configuration: config
+                                )
+                                showingCreateBottleSheet = false
+                                newBottleName = ""
+                                createError = nil
+                            } catch {
+                                createError = error.localizedDescription
+                            }
                         }
                     }
                     .buttonStyle(.borderedProminent)
+                    .disabled(viewModel.registeredRuntimes.isEmpty)
                 }
             }
             .padding()
-            .frame(width: 400)
+            .frame(width: 440)
         }
     }
 }

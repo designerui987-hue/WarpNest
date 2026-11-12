@@ -36,7 +36,6 @@ public struct RuntimeID: Hashable, Codable, Sendable, CustomStringConvertible {
 /// Graphics backend supported by a runtime or requested by a bottle.
 public enum GraphicsBackend: String, Codable, Sendable, CaseIterable {
     case automatic = "Automatic"
-    case d3dMetal = "D3DMetal (Apple GPTK)"
     case dxvk = "DXVK (DirectX 9/10/11 -> Vulkan -> Metal)"
     case wineD3D = "WineD3D (DirectX -> OpenGL/Metal)"
 
@@ -45,9 +44,26 @@ public enum GraphicsBackend: String, Codable, Sendable, CaseIterable {
 
 /// Synchronization method for Windows threads.
 public enum SyncBackend: String, Codable, Sendable, CaseIterable {
+    case standard = "Standard Wine Sync"
     case esync = "ESync (Eventfd)"
     case msync = "MSync (Mach Port Sync)"
-    case standard = "Standard Wine Sync"
+}
+
+/// Global application configuration settings persisted to disk.
+public struct AppSettings: Codable, Sendable, Equatable {
+    public var developerModeEnabled: Bool
+    public var defaultSyncBackend: SyncBackend
+    public var defaultHighResolutionMode: Bool
+
+    public init(
+        developerModeEnabled: Bool = false,
+        defaultSyncBackend: SyncBackend = .esync,
+        defaultHighResolutionMode: Bool = true
+    ) {
+        self.developerModeEnabled = developerModeEnabled
+        self.defaultSyncBackend = defaultSyncBackend
+        self.defaultHighResolutionMode = defaultHighResolutionMode
+    }
 }
 
 /// Configuration options for a bottle.

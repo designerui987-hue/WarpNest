@@ -26,6 +26,11 @@ struct MainWindowView: View {
             }
         }
         .frame(minWidth: 900, minHeight: 600)
+        .alert("WarpNest Notice", isPresented: $viewModel.showingErrorAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(viewModel.errorMessage ?? "")
+        }
         .task {
             await viewModel.initializeApp()
         }

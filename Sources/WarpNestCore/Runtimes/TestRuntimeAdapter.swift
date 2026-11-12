@@ -1,6 +1,7 @@
 import Foundation
 
 /// Fast, deterministic mock/test adapter for unit testing and CI without requiring a 300MB external Wine runtime.
+/// Explicitly tagged with isSimulation = true so it is never presented as a real Wine compatibility runtime.
 public struct TestRuntimeAdapter: RuntimeAdapter {
     public let descriptor: RuntimeDescriptor
     private let simulatedBinaryURL: URL
@@ -9,10 +10,11 @@ public struct TestRuntimeAdapter: RuntimeAdapter {
         self.simulatedBinaryURL = simulatedBinaryURL
         self.descriptor = RuntimeDescriptor(
             id: RuntimeID("test-adapter-v1"),
-            name: "WarpNest Test Runtime Adapter",
+            name: "WarpNest Simulated Test Engine",
             version: "1.0-simulated",
             rootPath: "/usr/bin",
             isVerified: true,
+            isSimulation: true,
             supportedArchitectures: ["arm64", "x86_64"],
             supportedGraphicsBackends: [.automatic, .wineD3D, .dxvk]
         )
@@ -47,7 +49,6 @@ public struct TestRuntimeAdapter: RuntimeAdapter {
         arguments: [String],
         configuration: BottleConfiguration
     ) throws -> (executableURL: URL, arguments: [String], environment: [String: String]) {
-        // In the test adapter, we execute the simulated binary (/bin/echo or similar) with the program path as an argument.
         var args = ["Simulated Execution in prefix \(prefixURL.lastPathComponent):", executablePath]
         args.append(contentsOf: arguments)
 

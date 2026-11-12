@@ -1,68 +1,39 @@
 # WarpNest
 
-WarpNest is a free, native, open-source macOS application designed for installing, organizing, and running compatible Windows games using verified compatibility runtimes on Apple Silicon and modern macOS.
+WarpNest is a free, open-source native macOS application designed to organize, configure, and run Windows games and applications on Apple Silicon (arm64) and Intel Macs using verified compatibility runtimes (Wine / WoW64).
 
----
+## Current Status & Verification Tiers
 
-## Key Features
+To maintain strict engineering transparency, WarpNest features are categorized into four verification tiers:
 
-- **Native macOS Experience:** Designed and built with SwiftUI for macOS 14+ (Sonoma, Sequoia, and beyond).
-- **Decoupled Architecture:** Clean separation between `WarpNestCore` (testable domain logic, process supervisor, and runtime adapters) and the macOS App Shell.
-- **Robust Process Supervision:** Launches processes with explicit URL paths and argument arrays—never interpolating user input into shell strings. Concurrent stream draining into bounded ring buffers prevents log explosions and deadlocks.
-- **Deterministic Compatibility Runtimes:** Full support for Wine-Staging, WineCX, and custom compatibility engines with WoW64 on Apple Silicon.
-- **Safe Bottle Management:** Prefix isolation, per-bottle async mutexes to prevent concurrent conflicting operations, and zip archive backup/restore with path-traversal safeguards.
-- **Privacy & Freedom First:** 100% free and open-source under the MIT license. Zero accounts, zero telemetry, no subscriptions, no ads, and no root/SIP-disabling required.
+| Component / Feature | Verification Tier | Notes |
+| :--- | :--- | :--- |
+| **SwiftUI Multi-Pane Architecture** | **Implemented & Verified** | Native `NavigationSplitView` with Library, Bottles, Diagnostics, and Settings views. |
+| **Process Supervision (`ProcessSupervisor`)** | **Implemented & Verified** | Actor-based execution, array-based argument passing (no shell interpolation), streaming stdout/stderr pipe draining, bounded ring buffer. |
+| **Session & Bottle Locking** | **Implemented & Verified** | Mutex locking prevents concurrent destructive actions (backup, deletion) while game sessions are preparing or active. |
+| **Settings & State Persistence** | **Implemented & Verified** | Atomic JSON persistence with `.tmp` swapping for library shortcuts, bottles, and settings. |
+| **Zip Backup & Safe Restore** | **Implemented & Verified** | Symlink-preserving zip backup (`-y`) and table-of-contents validation rejecting path traversal attacks (`../`). |
+| **Simulated Test Adapter (`TestRuntimeAdapter`)** | **Implemented (Explicit Test Mode)** | Isolated behind Developer/Test mode toggle; runs deterministic mock processes (`/bin/echo`) and is never silently substituted for real Wine runtimes. |
+| **Wine Runtime Adapter (`WineRuntimeAdapter`)** | **Implemented** | Supports standard UNIX layout (`bin/wine`) and macOS app bundles (`Contents/Resources/wine/bin/wine`). Lazily verified via `wine --version` before bottle creation is unlocked. |
+| **Real Windows GUI App Launch** | **Pending Host Runtime** | No pre-existing Wine runtime or Windows binary was detected on the current Mac system. Real wine execution will be enabled as soon as a runtime is imported. |
 
----
+## Quick Start (Developer / Test Mode)
 
-## Architecture Overview
+1. Clone or open the project in Xcode or Terminal.
+2. Build and run:
+   ```bash
+   swift build
+   swift test
+   swift run WarpNest
+   ```
+3. To test UI flows without an external Wine installation, open **Settings**, toggle **Enable Developer / Simulated Mode**, and navigate to **Bottles** or **Library**.
 
-```
-WarpNest
-├── Sources/WarpNestCore
-│   ├── Models/               # Core data models (GameItem, Bottle, Configuration)
-│   ├── Supervisor/           # Supervised process execution & bounded ring buffer
-│   ├── Storage/              # Atomic JSON persistence & Application Support paths
-│   ├── Runtimes/             # RuntimeAdapter protocol, TestRuntimeAdapter, WineRuntimeAdapter
-│   ├── Bottles/              # Bottle provisioning, mutex locking, and backup/restore
-│   ├── Library/              # Game indexing and launch lifecycle management
-│   └── Diagnostics/          # Hardware diagnostics & redaction-aware log reporting
-├── Sources/WarpNest
-│   ├── App/                  # SwiftUI App lifecycle and main window
-│   ├── ViewModels/           # Observable AppViewModel
-│   └── Views/                # Library, Bottles, Diagnostics, and Settings views
-└── Tests/WarpNestCoreTests   # Comprehensive unit and integration test suite
-```
+## Importing a Real Wine Runtime
 
----
-
-## Building from Source
-
-### Prerequisites
-- macOS 14.0 or newer
-- Xcode 15+ (Xcode 27.2 verified)
-- Swift 6.0+ toolchain
-
-### Build Commands
-```bash
-# Build the native app and core libraries
-swift build
-
-# Run the complete automated test suite
-swift test
-```
-
----
-
-## Documentation
-
-- [docs/environment.md](docs/environment.md): Verified developer host specifications.
-- [docs/implementation-plan.md](docs/implementation-plan.md): Architectural roadmap and milestones.
-- [docs/runtime-evaluation.md](docs/runtime-evaluation.md): Technical evaluation of Apple Silicon compatibility runtimes (Wine-Staging, WineCX, DXVK, MoltenVK).
-- [docs/progress.md](docs/progress.md): Live progress tracker and automated test evidence.
-
----
+1. Obtain a verified macOS Wine build (e.g. Wine-Staging or custom WineCX build).
+2. In WarpNest, go to **Settings** -> **Import Wine Runtime...** and select the root directory or `.app` bundle.
+3. WarpNest validates executable permissions and runs `wine --version` to query capabilities. Once validated, real bottle creation is unlocked.
 
 ## License
 
-WarpNest is licensed under the [MIT License](LICENSE).
+MIT License. See [LICENSE](LICENSE) for details.
