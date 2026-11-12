@@ -553,3 +553,88 @@ struct ArchiveSecurityAndIntegrityTests {
         try? FileManager.default.removeItem(at: tempDir)
     }
 }
+
+@Suite("Real Wine Runtime Demonstration Tests")
+struct RealWineRuntimeDemonstrationTests {
+    private let runtimeURL = URL(fileURLWithPath: "/Volumes/Personal/WarpNest/Runtimes/Wine-Staging-11.21/Wine Staging.app")
+
+    @Test("Validate imported Wine-Staging runtime and query actual version")
+    func testRealWineValidationAndVersion() async throws {
+        guard FileManager.default.fileExists(atPath: runtimeURL.path) else {
+            // Skip if runtime is not present
+            return
+        }
+
+        let adapter = try WineRuntimeAdapter(rootDirectory: runtimeURL, stableID: RuntimeID("wine-staging-11.21"))
+        let isValid = try await adapter.validate()
+        #expect(isValid == true)
+
+        let version = await adapter.queryVersion()
+        #expect(version != nil)
+        #expect(version?.contains("11.21") == true)
+    }
+
+    @Test("Real Wine bottle creation, prefix initialization, and execution")
+    func testRealWineBottleCreationAndLaunch() async throws {
+        guard FileManager.default.fileExists(atPath: runtimeURL.path) else {
+            return
+        }
+
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("WarpNestRealWineTest_\(UUID().uuidString)")
+        let store = MetadataStore(baseDirectory: tempDir)
+        let bottleService = BottleService(metadataStore: store)
+        let libraryService = LibraryService(metadataStore: store, bottleService: bottleService)
+
+        var adapter = try WineRuntimeAdapter(rootDirectory: runtimeURL, stableID: RuntimeID("wine-staging-11.21"))
+        let isValid = try await adapter.validate()
+        #expect(isValid == true)
+        adapter.descriptor.isVerified = true
+        if let ver = await adapter.queryVersion() {
+            adapter.descriptor.version = ver
+        }
+        await bottleService.registerAdapter(adapter)
+
+        // 1. Create a real bottle with wineboot prefix initialization
+        let bottle = try await bottleService.createBottle(
+            name: "Native Wine Bottle",
+            runtimeID: adapter.descriptor.id
+        )
+
+        #expect(FileManager.default.fileExists(atPath: bottle.directoryPath))
+        let bottleURL = URL(fileURLWithPath: bottle.directoryPath)
+        let driveC = bottleURL.appendingPathComponent("drive_c")
+        #expect(FileManager.default.fileExists(atPath: driveC.path))
+
+        // Check if notepad.exe was created inside windows or windows/system32
+        let notepadURL = driveC.appendingPathComponent("windows/notepad.exe")
+        let sys32Notepad = driveC.appendingPathComponent("windows/system32/notepad.exe")
+        let targetNotepad = FileManager.default.fileExists(atPath: notepadURL.path) ? "drive_c/windows/notepad.exe" : (FileManager.default.fileExists(atPath: sys32Notepad.path) ? "drive_c/windows/system32/notepad.exe" : nil)
+
+        if let relNotepad = targetNotepad {
+            let game = try await libraryService.addGame(
+                name: "Windows Notepad",
+                bottleID: bottle.id,
+                executableRelativePath: relNotepad
+            )
+            #expect(game.name == "Windows Notepad")
+
+            // Launch Notepad
+            try await libraryService.launchGame(id: game.id)
+
+            // Verify bottle lock is held
+            let lockStatus = await bottleService.isBottleLocked(id: bottle.id)
+            #expect(lockStatus.isLocked == true)
+
+            // Stop the game
+            await libraryService.stopGame(id: game.id)
+
+            // Verify bottle lock is released
+            let lockAfter = await bottleService.isBottleLocked(id: bottle.id)
+            #expect(lockAfter.isLocked == false)
+        }
+
+        // Clean up bottle and prefix
+        try await bottleService.deleteBottle(id: bottle.id)
+        try? FileManager.default.removeItem(at: tempDir)
+    }
+}

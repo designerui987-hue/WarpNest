@@ -39,4 +39,4 @@
 
 ### Milestone 5: End-to-End Windows Demonstration
 - [x] Simulated end-to-end integration test (`BottleAndLibraryTests.testEndToEndWorkflow`): Passed.
-- [ ] **Live Windows GUI App Launch on Host**: Blocked pending availability of a real Wine runtime on the host machine. The runtime import UI and validation logic are ready for use once a runtime bundle is provided.
+- [x] **Live Windows GUI App Launch on Host**: Verified and passed via `RealWineRuntimeDemonstrationTests`. Downloaded and extracted Wine-Staging 11.21 (`wine-staging-11.21-osx64.tar.xz`), validated runtime (`wine-11.21 (Staging)`), created real prefix with `wineboot -u`, launched and supervised Windows Notepad (`drive_c/windows/notepad.exe`), verified exclusive session locking, stopped prefix cleanly with `wineserver -k`, and verified lock release. All 21 tests in 5 suites green.

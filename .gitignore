@@ -14,6 +14,7 @@ project.xcworkspace/xcuserdata/
 # App Data & User Test Data
 WarpNestAppData/
 WineRuntimes/
+Runtimes/
 TestBottles/
 *.log
 *.zip

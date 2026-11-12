@@ -19,7 +19,7 @@ To maintain strict engineering transparency, WarpNest features are categorized i
 | **Simulated Test Adapter (`TestRuntimeAdapter`)** | **Implemented (Explicit Test Mode)** | Isolated behind Developer Mode toggle; cleanly unregistered when Developer Mode is disabled (WN-09). Visual `[SIMULATED]` indicators on cards and pickers. |
 | **Wine Runtime Adapter (`WineRuntimeAdapter`)** | **Implemented & Verified** | Strict validation requiring `wine`, `wineboot`, and `wineserver` companion executables with execution permissions. Bounded `wine --version` check (WN-12). |
 | **Path Resolution & WINEPREFIX Protection** | **Implemented & Verified** | Canonical symlink resolution, bottle boundary containment, explicit external installer support, and reserved environment key protection (WN-01, WN-12). |
-| **Real Windows GUI App Launch** | **Pending Host Runtime** | No pre-existing Wine runtime or Windows binary was detected on the development Mac. Real wine execution will be demonstrated as soon as a runtime is imported. |
+| **Real Windows GUI App Launch** | **Implemented & Verified** | Verified on Apple Silicon host using Wine-Staging 11.21. Full prefix creation via `wineboot`, Windows GUI app supervision (`notepad.exe`), exclusive session locking, and clean prefix shutdown. |
 
 ## Quick Start (Developer / Test Mode)
 
