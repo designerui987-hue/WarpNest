@@ -59,9 +59,17 @@ public struct DiagnosticsService: Sendable {
 
         let hasXcode = fileManager.fileExists(atPath: "/Applications/Xcode.app")
 
+        #if arch(arm64)
+        let hostArch = "arm64"
+        #elseif arch(x86_64)
+        let hostArch = "x86_64"
+        #else
+        let hostArch = "unknown"
+        #endif
+
         return SystemDiagnostics(
             osVersion: osVer,
-            architecture: "arm64",
+            architecture: hostArch,
             physicalMemoryGB: mem,
             rosettaActive: isRosetta,
             freeDiskSpaceGB: freeDiskGB,

@@ -40,6 +40,19 @@ public enum GraphicsBackend: String, Codable, Sendable, CaseIterable {
     case wineD3D = "WineD3D (DirectX -> OpenGL/Metal)"
 
     public var displayName: String { rawValue }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let raw = try container.decode(String.self)
+        // Backward-compatible migration: map legacy d3dMetal / D3DMetal to DXVK (WN-15)
+        if raw == "d3dMetal" || raw == "D3DMetal" {
+            self = .dxvk
+        } else if let match = GraphicsBackend(rawValue: raw) {
+            self = match
+        } else {
+            self = .automatic
+        }
+    }
 }
 
 /// Synchronization method for Windows threads.
@@ -121,6 +134,35 @@ public struct Bottle: Identifiable, Codable, Sendable, Equatable {
     }
 }
 
+/// A runtime entry persisted to disk so imported runtimes survive restarts.
+public struct PersistedRuntime: Codable, Sendable, Identifiable {
+    public let id: RuntimeID          // stable UUID-based identifier
+    public let displayName: String
+    public let executablePath: String // absolute path to wine binary
+    public let rootPath: String       // absolute path to runtime root
+    public let version: String        // from wine --version or "unknown"
+    public let importedAt: Date
+    public let isUserImported: Bool   // false = auto-discovered
+
+    public init(
+        id: RuntimeID,
+        displayName: String,
+        executablePath: String,
+        rootPath: String,
+        version: String,
+        importedAt: Date,
+        isUserImported: Bool
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.executablePath = executablePath
+        self.rootPath = rootPath
+        self.version = version
+        self.importedAt = importedAt
+        self.isUserImported = isUserImported
+    }
+}
+
 /// Status of an application launch or session.
 public enum SessionState: String, Codable, Sendable {
     case stopped = "Stopped"
@@ -139,6 +181,7 @@ public struct GameItem: Identifiable, Codable, Sendable, Equatable {
     public var workingDirectoryRelativePath: String?
     public var arguments: [String]
     public var environmentOverrides: [String: String]
+    public var isExternalExecutable: Bool
     public var iconPath: String?
     public var notes: String
     public var createdAt: Date
@@ -153,6 +196,7 @@ public struct GameItem: Identifiable, Codable, Sendable, Equatable {
         workingDirectoryRelativePath: String? = nil,
         arguments: [String] = [],
         environmentOverrides: [String: String] = [:],
+        isExternalExecutable: Bool = false,
         iconPath: String? = nil,
         notes: String = "",
         createdAt: Date = Date(),
@@ -166,10 +210,28 @@ public struct GameItem: Identifiable, Codable, Sendable, Equatable {
         self.workingDirectoryRelativePath = workingDirectoryRelativePath
         self.arguments = arguments
         self.environmentOverrides = environmentOverrides
+        self.isExternalExecutable = isExternalExecutable
         self.iconPath = iconPath
         self.notes = notes
         self.createdAt = createdAt
         self.lastPlayedAt = lastPlayedAt
         self.totalPlayTimeSeconds = totalPlayTimeSeconds
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(GameID.self, forKey: .id)
+        self.name = try container.decode(String.self, forKey: .name)
+        self.bottleID = try container.decode(BottleID.self, forKey: .bottleID)
+        self.executableRelativePath = try container.decode(String.self, forKey: .executableRelativePath)
+        self.workingDirectoryRelativePath = try container.decodeIfPresent(String.self, forKey: .workingDirectoryRelativePath)
+        self.arguments = try container.decodeIfPresent([String].self, forKey: .arguments) ?? []
+        self.environmentOverrides = try container.decodeIfPresent([String: String].self, forKey: .environmentOverrides) ?? [:]
+        self.isExternalExecutable = try container.decodeIfPresent(Bool.self, forKey: .isExternalExecutable) ?? false
+        self.iconPath = try container.decodeIfPresent(String.self, forKey: .iconPath)
+        self.notes = try container.decodeIfPresent(String.self, forKey: .notes) ?? ""
+        self.createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        self.lastPlayedAt = try container.decodeIfPresent(Date.self, forKey: .lastPlayedAt)
+        self.totalPlayTimeSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .totalPlayTimeSeconds) ?? 0
     }
 }

@@ -7,6 +7,7 @@ struct LibraryView: View {
     @State private var newGameName = ""
     @State private var newGameBottleID: BottleID?
     @State private var newGameExecutable = ""
+    @State private var isExternalExecutable = false
     @State private var validationError: String?
 
     var body: some View {
@@ -123,18 +124,27 @@ struct LibraryView: View {
                         }
                         if panel.runModal() == .OK, let url = panel.url {
                             if let selectedBottle = viewModel.bottles.first(where: { $0.id == (newGameBottleID ?? viewModel.bottles.first?.id) }) {
-                                let prefixPath = selectedBottle.directoryPath
-                                if url.path.hasPrefix(prefixPath) {
-                                    var rel = String(url.path.dropFirst(prefixPath.count))
-                                    if rel.hasPrefix("/") { rel.removeFirst() }
+                                let resolvedPrefix = URL(fileURLWithPath: selectedBottle.directoryPath).resolvingSymlinksInPath()
+                                let resolvedSelected = url.resolvingSymlinksInPath()
+                                let prefixPath = resolvedPrefix.path.hasSuffix("/") ? resolvedPrefix.path : resolvedPrefix.path + "/"
+                                if resolvedSelected.path.hasPrefix(prefixPath) {
+                                    let rel = String(resolvedSelected.path.dropFirst(prefixPath.count))
                                     newGameExecutable = rel
+                                    isExternalExecutable = false
                                 } else {
-                                    newGameExecutable = url.path
+                                    newGameExecutable = resolvedSelected.path
+                                    isExternalExecutable = true
                                 }
                             }
                         }
                     }
                 }
+            }
+
+            if isExternalExecutable {
+                Text("Selected executable is outside the bottle. It will run with this bottle's prefix as an external installer/application.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
             }
 
             if let err = validationError {
@@ -164,11 +174,13 @@ struct LibraryView: View {
                             try await viewModel.addGame(
                                 name: newGameName.isEmpty ? "New Game" : newGameName,
                                 bottleID: bottleID,
-                                executablePath: newGameExecutable
+                                executablePath: newGameExecutable,
+                                isExternalExecutable: isExternalExecutable
                             )
                             showingAddGameSheet = false
                             newGameName = ""
                             newGameExecutable = ""
+                            isExternalExecutable = false
                             validationError = nil
                         } catch {
                             validationError = error.localizedDescription

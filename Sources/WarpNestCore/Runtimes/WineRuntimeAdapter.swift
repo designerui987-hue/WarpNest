@@ -10,7 +10,7 @@ public struct WineRuntimeAdapter: RuntimeAdapter {
 
     /// Initializes an adapter for a Wine distribution root.
     /// Supports both standard UNIX layouts (root/bin/wine) and macOS App bundles (root/Contents/Resources/wine/bin/wine).
-    public init(rootDirectory: URL) throws {
+    public init(rootDirectory: URL, stableID: RuntimeID? = nil) throws {
         let fileManager = FileManager.default
 
         let directBin = rootDirectory.appendingPathComponent("bin", isDirectory: true)
@@ -40,12 +40,28 @@ public struct WineRuntimeAdapter: RuntimeAdapter {
             throw RuntimeAdapterError.permissionDenied(actualWine.path)
         }
 
+        // Validate required companion executables (WN-03 / WN-12)
+        guard fileManager.fileExists(atPath: winebootURL.path) else {
+            throw RuntimeAdapterError.binaryNotFound(winebootURL.path)
+        }
+        guard fileManager.isExecutableFile(atPath: winebootURL.path) else {
+            throw RuntimeAdapterError.permissionDenied(winebootURL.path)
+        }
+
+        guard fileManager.fileExists(atPath: wineserverURL.path) else {
+            throw RuntimeAdapterError.binaryNotFound(wineserverURL.path)
+        }
+        guard fileManager.isExecutableFile(atPath: wineserverURL.path) else {
+            throw RuntimeAdapterError.permissionDenied(wineserverURL.path)
+        }
+
         self.wineExecutableURL = actualWine
         self.winebootExecutableURL = winebootURL
         self.wineserverExecutableURL = wineserverURL
 
+        let assignedID = stableID ?? RuntimeID("wine-" + UUID().uuidString)
         self.descriptor = RuntimeDescriptor(
-            id: RuntimeID("wine-\(rootDirectory.lastPathComponent)"),
+            id: assignedID,
             name: "Wine (\(rootDirectory.lastPathComponent))",
             version: "Unknown (Unvalidated)",
             rootPath: rootDirectory.path,
@@ -60,7 +76,11 @@ public struct WineRuntimeAdapter: RuntimeAdapter {
     public func validate() async throws -> Bool {
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: wineExecutableURL.path),
-              fileManager.isExecutableFile(atPath: wineExecutableURL.path) else {
+              fileManager.isExecutableFile(atPath: wineExecutableURL.path),
+              fileManager.fileExists(atPath: winebootExecutableURL.path),
+              fileManager.isExecutableFile(atPath: winebootExecutableURL.path),
+              fileManager.fileExists(atPath: wineserverExecutableURL.path),
+              fileManager.isExecutableFile(atPath: wineserverExecutableURL.path) else {
             return false
         }
 
@@ -87,16 +107,24 @@ public struct WineRuntimeAdapter: RuntimeAdapter {
         }
     }
 
-    /// Queries the actual runtime version string via `wine --version`.
+    /// Queries the actual runtime version string via `wine --version` with a bounded deadline.
     public func queryVersion() async -> String? {
         let buffer = LogRingBuffer()
         let sup = ProcessSupervisor(logBuffer: buffer)
-        do {
-            let status = try await sup.launch(
+        let queryTask = Task {
+            try await sup.launch(
                 executableURL: wineExecutableURL,
                 arguments: ["--version"]
             )
-            if status.exitCode == 0 {
+        }
+        let timeoutTask = Task {
+            try await Task.sleep(nanoseconds: 5_000_000_000)
+            await sup.terminate()
+        }
+        do {
+            let status = try await queryTask.value
+            timeoutTask.cancel()
+            if status.exitCode == 0 && !status.wasCancelled {
                 let lines = buffer.getAllLines()
                 for line in lines {
                     if line.starts(with: "[STDOUT] ") {
@@ -106,6 +134,7 @@ public struct WineRuntimeAdapter: RuntimeAdapter {
                 }
             }
         } catch {
+            timeoutTask.cancel()
             return nil
         }
         return nil
@@ -167,6 +196,10 @@ public struct WineRuntimeAdapter: RuntimeAdapter {
         arguments: [String],
         configuration: BottleConfiguration
     ) throws -> (executableURL: URL, arguments: [String], environment: [String: String]) {
+        // executablePath must be an absolute path resolved and validated by LibraryService (WN-01).
+        // LibraryService.resolveAndValidateExecutable guarantees it is absolute and inside the bottle.
+        assert(executablePath.hasPrefix("/"), "executablePath must be an absolute path")
+
         var args = [executablePath]
         args.append(contentsOf: arguments)
 
@@ -190,7 +223,10 @@ public struct WineRuntimeAdapter: RuntimeAdapter {
             break
         }
 
-        for (k, v) in configuration.environmentVariables {
+        // WN-12: strip reserved Wine keys from bottle configuration overrides so callers cannot
+        // redirect WINEPREFIX, WINESERVER, WINELOADER, WINEDLLPATH, or WINEDEBUG away from managed values.
+        let reservedKeys: Set<String> = ["WINEPREFIX", "WINESERVER", "WINELOADER", "WINEDLLPATH", "WINEDEBUG"]
+        for (k, v) in configuration.environmentVariables where !reservedKeys.contains(k) {
             env[k] = v
         }
 

@@ -10,6 +10,7 @@ public enum LibraryServiceError: Error, LocalizedError, Sendable {
     case alreadyRunning(GameID)
     case runtimeUnavailable(String)
     case bottleBusy(BottleID, String)
+    case pathEscapesBottle(String)
 
     public var errorDescription: String? {
         switch self {
@@ -21,20 +22,32 @@ public enum LibraryServiceError: Error, LocalizedError, Sendable {
         case .alreadyRunning(let id): return "Game '\(id)' is already running."
         case .runtimeUnavailable(let msg): return "Runtime is unavailable: \(msg)"
         case .bottleBusy(let id, let reason): return "Bottle '\(id)' cannot start game: \(reason)"
+        case .pathEscapesBottle(let path): return "Path '\(path)' escapes the bottle directory and is not permitted."
         }
     }
 }
 
-/// Active running game session tracking model.
+/// Active running game session tracking model with owned session and lock tokens (WN-04/WN-05).
 public struct ActiveSession: Sendable {
+    public let sessionID: UUID
     public let gameID: GameID
     public let bottleID: BottleID
+    public let lockLease: BottleLockLease
     public let supervisor: ProcessSupervisor
     public let startedAt: Date
 
-    public init(gameID: GameID, bottleID: BottleID, supervisor: ProcessSupervisor, startedAt: Date = Date()) {
+    public init(
+        sessionID: UUID = UUID(),
+        gameID: GameID,
+        bottleID: BottleID,
+        lockLease: BottleLockLease,
+        supervisor: ProcessSupervisor,
+        startedAt: Date = Date()
+    ) {
+        self.sessionID = sessionID
         self.gameID = gameID
         self.bottleID = bottleID
+        self.lockLease = lockLease
         self.supervisor = supervisor
         self.startedAt = startedAt
     }
@@ -75,23 +88,57 @@ public actor LibraryService {
         try await metadataStore.save(list, to: "library.json")
     }
 
+    /// Reserved Wine environment keys that LibraryService manages and must not be overridden by game or bottle config.
+    private static let reservedWineEnvKeys: Set<String> = [
+        "WINEPREFIX", "WINESERVER", "WINELOADER", "WINEDLLPATH", "WINEDEBUG"
+    ]
+
+    /// Resolves `relativePath` against `bottleURL`, resolves symlinks on both sides, verifies the
+    /// result is contained within the bottle (WN-12 path traversal protection), and checks existence.
+    /// - Returns: The absolute, symlink-resolved URL of the executable.
+    /// - Throws: `LibraryServiceError.pathEscapesBottle` on containment failure,
+    ///           `LibraryServiceError.executableNotFound` if the file does not exist.
+    private func resolveAndValidateExecutable(relativePath: String, bottleURL: URL) throws -> URL {
+        let resolvedBottle = bottleURL.resolvingSymlinksInPath()
+        let rawExeURL = bottleURL.appendingPathComponent(relativePath)
+        let resolvedExe = rawExeURL.resolvingSymlinksInPath()
+
+        // Ensure the resolved exe path is inside the bottle (guards against ../../ traversal).
+        let bottlePath = resolvedBottle.path.hasSuffix("/") ? resolvedBottle.path : resolvedBottle.path + "/"
+        guard resolvedExe.path.hasPrefix(bottlePath) || resolvedExe.path == resolvedBottle.path else {
+            throw LibraryServiceError.pathEscapesBottle(relativePath)
+        }
+
+        guard FileManager.default.fileExists(atPath: resolvedExe.path) else {
+            throw LibraryServiceError.executableNotFound(resolvedExe.path)
+        }
+
+        return resolvedExe
+    }
+
     public func addGame(
         name: String,
         bottleID: BottleID,
         executableRelativePath: String,
         workingDirectoryRelativePath: String? = nil,
         arguments: [String] = [],
-        environmentOverrides: [String: String] = [:]
+        environmentOverrides: [String: String] = [:],
+        isExternalExecutable: Bool = false
     ) async throws -> GameItem {
         guard let bottle = await bottleService.getBottle(id: bottleID) else {
             throw LibraryServiceError.bottleNotFound(bottleID)
         }
 
-        // Validate executable file existence inside bottle prefix
         let bottleURL = URL(fileURLWithPath: bottle.directoryPath)
-        let fullExeURL = bottleURL.appendingPathComponent(executableRelativePath)
-        guard FileManager.default.fileExists(atPath: fullExeURL.path) else {
-            throw LibraryServiceError.executableNotFound(fullExeURL.path)
+        if isExternalExecutable {
+            // Explicit external executable/installer outside bottle
+            let externalURL = URL(fileURLWithPath: executableRelativePath).resolvingSymlinksInPath()
+            guard FileManager.default.fileExists(atPath: externalURL.path) else {
+                throw LibraryServiceError.executableNotFound(externalURL.path)
+            }
+        } else {
+            // Validate executable file existence inside bottle prefix, with path containment check (WN-12).
+            _ = try resolveAndValidateExecutable(relativePath: executableRelativePath, bottleURL: bottleURL)
         }
 
         let newGame = GameItem(
@@ -100,7 +147,8 @@ public actor LibraryService {
             executableRelativePath: executableRelativePath,
             workingDirectoryRelativePath: workingDirectoryRelativePath,
             arguments: arguments,
-            environmentOverrides: environmentOverrides
+            environmentOverrides: environmentOverrides,
+            isExternalExecutable: isExternalExecutable
         )
 
         games[newGame.id] = newGame
@@ -161,57 +209,89 @@ public actor LibraryService {
             throw LibraryServiceError.runtimeUnavailable("Runtime adapter not registered for \(bottle.runtimeID)")
         }
 
-        // Lock bottle for this active running game session!
-        do {
-            try await bottleService.lockBottle(id: game.bottleID, reason: "Game session '\(game.name)' is running")
-        } catch {
-            throw LibraryServiceError.bottleBusy(game.bottleID, "Bottle is currently locked by another operation")
-        }
-
         notifyStateChange(for: id, state: .preparing)
         let buffer = getLogBuffer(for: id)
         buffer.append("[LAUNCH] Starting launch sequence for '\(game.name)' in bottle '\(bottle.name)'...")
 
         let bottleURL = URL(fileURLWithPath: bottle.directoryPath)
+
+        // WN-01/WN-12: resolve absolute executable path and validate containment before passing to adapter.
+        let resolvedExeURL: URL
+        if game.isExternalExecutable {
+            let externalURL = URL(fileURLWithPath: game.executableRelativePath).resolvingSymlinksInPath()
+            guard FileManager.default.fileExists(atPath: externalURL.path) else {
+                throw LibraryServiceError.executableNotFound(externalURL.path)
+            }
+            resolvedExeURL = externalURL
+        } else {
+            resolvedExeURL = try resolveAndValidateExecutable(
+                relativePath: game.executableRelativePath,
+                bottleURL: bottleURL
+            )
+        }
+
         let execPlan = try adapter.buildExecutionPlan(
             prefixURL: bottleURL,
-            executablePath: game.executableRelativePath,
+            executablePath: resolvedExeURL.path,
             arguments: game.arguments,
             configuration: bottle.configuration
         )
 
-        // Resolve working directory: user override, or folder containing executable, or drive_c
+        // Lock bottle exclusively for this active game session (WN-05)
+        let lockLease: BottleLockLease
+        do {
+            lockLease = try await bottleService.acquireLock(
+                id: game.bottleID,
+                reason: "Game session '\(game.name)' is running"
+            )
+        } catch {
+            throw LibraryServiceError.bottleBusy(game.bottleID, "Bottle is currently locked by another operation")
+        }
+
+        // Resolve working directory: user override, or folder containing the (absolute) executable.
         let resolvedWorkingDir: URL
         if let customWorkingRel = game.workingDirectoryRelativePath, !customWorkingRel.isEmpty {
             resolvedWorkingDir = bottleURL.appendingPathComponent(customWorkingRel)
         } else {
-            let exeURL = bottleURL.appendingPathComponent(game.executableRelativePath)
-            resolvedWorkingDir = exeURL.deletingLastPathComponent()
+            resolvedWorkingDir = resolvedExeURL.deletingLastPathComponent()
         }
 
+        let sessionID = UUID()
         let supervisor = ProcessSupervisor(logBuffer: buffer)
-        let session = ActiveSession(gameID: id, bottleID: game.bottleID, supervisor: supervisor)
+        let session = ActiveSession(
+            sessionID: sessionID,
+            gameID: id,
+            bottleID: game.bottleID,
+            lockLease: lockLease,
+            supervisor: supervisor
+        )
         activeSessions[id] = session
 
         var env = execPlan.environment
-        for (k, v) in game.environmentOverrides {
+        // WN-12: strip reserved Wine env keys from game overrides to prevent WINEPREFIX hijacking.
+        for (k, v) in game.environmentOverrides where !LibraryService.reservedWineEnvKeys.contains(k) {
             env[k] = v
         }
 
         Task { [weak self] in
             do {
-                await self?.notifyStateChange(for: id, state: .running)
                 let status = try await supervisor.launch(
                     executableURL: execPlan.executableURL,
                     arguments: execPlan.arguments,
                     workingDirectory: resolvedWorkingDir,
-                    environment: env
+                    environment: env,
+                    onSpawn: { [weak self] _ in
+                        Task { [weak self] in
+                            // WN-10: Only emit .running once spawn actually succeeds
+                            await self?.notifyStateChange(for: id, state: .running)
+                        }
+                    }
                 )
-                await self?.handleGameExit(id: id, status: status)
+                await self?.handleGameExit(sessionID: sessionID, id: id, status: status)
             } catch {
                 buffer.append("[LAUNCH ERROR] \(error.localizedDescription)")
                 await self?.notifyStateChange(for: id, state: .failed)
-                await self?.handleGameExit(id: id, status: ProcessExitStatus(exitCode: -1))
+                await self?.handleGameExit(sessionID: sessionID, id: id, status: ProcessExitStatus(exitCode: -1))
             }
         }
 
@@ -222,17 +302,21 @@ public actor LibraryService {
         try? await persistGames()
     }
 
-    private func handleGameExit(id: GameID, status: ProcessExitStatus) async {
-        if let session = activeSessions[id] {
-            let duration = Date().timeIntervalSince(session.startedAt)
-            if var game = games[id] {
-                game.totalPlayTimeSeconds += duration
-                games[id] = game
-                try? await persistGames()
-            }
-            // Unlock bottle now that the game has exited
-            await bottleService.unlockBottle(id: session.bottleID)
+    private func handleGameExit(sessionID: UUID, id: GameID, status: ProcessExitStatus) async {
+        // WN-05: Ensure this completion corresponds to the active session, guarding against obsolete callbacks
+        guard let session = activeSessions[id], session.sessionID == sessionID else {
+            return
         }
+
+        let duration = Date().timeIntervalSince(session.startedAt)
+        if var game = games[id] {
+            game.totalPlayTimeSeconds += duration
+            games[id] = game
+            try? await persistGames()
+        }
+
+        // Unlock bottle with matching lease token
+        _ = await bottleService.releaseLock(lease: session.lockLease)
         activeSessions.removeValue(forKey: id)
         notifyStateChange(for: id, state: status.exitCode == 0 ? .stopped : .failed)
     }
@@ -240,6 +324,7 @@ public actor LibraryService {
     /// Stops a running game session and stops associated prefix services (wineserver -k).
     public func stopGame(id: GameID) async {
         guard let session = activeSessions[id] else { return }
+        let sessionID = session.sessionID
         notifyStateChange(for: id, state: .stopping)
         await session.supervisor.terminate()
 
@@ -249,7 +334,9 @@ public actor LibraryService {
             try? await adapter.stopPrefix(at: bottleURL)
         }
 
-        await bottleService.unlockBottle(id: session.bottleID)
+        // WN-05: Only unlock and clear session if it still matches the stopped session ID
+        guard let current = activeSessions[id], current.sessionID == sessionID else { return }
+        _ = await bottleService.releaseLock(lease: session.lockLease)
         activeSessions.removeValue(forKey: id)
         notifyStateChange(for: id, state: .stopped)
     }

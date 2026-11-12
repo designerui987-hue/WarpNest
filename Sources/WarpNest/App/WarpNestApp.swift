@@ -2,7 +2,7 @@ import SwiftUI
 import WarpNestCore
 
 struct MainWindowView: View {
-    @State private var viewModel = AppViewModel()
+    @Bindable var viewModel: AppViewModel
 
     var body: some View {
         NavigationSplitView {
@@ -39,9 +39,12 @@ struct MainWindowView: View {
 
 @main
 struct WarpNestApp: App {
+    // Single application-scoped service container shared by all windows (WN-06)
+    @State private var sharedViewModel = AppViewModel()
+
     var body: some Scene {
         WindowGroup {
-            MainWindowView()
+            MainWindowView(viewModel: sharedViewModel)
         }
         .windowResizability(.contentMinSize)
         .commands {

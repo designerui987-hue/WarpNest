@@ -1,14 +1,21 @@
 import Foundation
 
-/// Thread-safe ring buffer for capturing process console output up to a maximum size.
+/// Thread-safe ring buffer for capturing process console output up to a maximum size and byte limit.
 public final class LogRingBuffer: @unchecked Sendable {
     private let lock = NSLock()
     private var lines: [String] = []
+    private var totalBytes: Int = 0
     public let maxCapacity: Int
+    public let maxBytes: Int
     private var onLineAdded: (@Sendable (String) -> Void)?
 
-    public init(maxCapacity: Int = 2000, onLineAdded: (@Sendable (String) -> Void)? = nil) {
+    public init(
+        maxCapacity: Int = 2000,
+        maxBytes: Int = 1_048_576, // 1 MB byte retention limit (WN-04 / N09)
+        onLineAdded: (@Sendable (String) -> Void)? = nil
+    ) {
         self.maxCapacity = maxCapacity
+        self.maxBytes = maxBytes
         self.onLineAdded = onLineAdded
     }
 
@@ -18,16 +25,30 @@ public final class LogRingBuffer: @unchecked Sendable {
         self.onLineAdded = handler
     }
 
-    public func append(_ line: String) {
+    public func append(_ rawLine: String) {
         let handler: (@Sendable (String) -> Void)?
         lock.lock()
-        lines.append(line)
-        if lines.count > maxCapacity {
-            lines.removeFirst(lines.count - maxCapacity)
+
+        // Chunk lines larger than 4KB to prevent unbounded line growth without newlines
+        let maxLineLength = 4096
+        var remaining = rawLine[...]
+        while !remaining.isEmpty {
+            let chunk = String(remaining.prefix(maxLineLength))
+            remaining = remaining.dropFirst(maxLineLength)
+
+            let byteCount = chunk.utf8.count
+            lines.append(chunk)
+            totalBytes += byteCount
+
+            while lines.count > maxCapacity || (totalBytes > maxBytes && !lines.isEmpty) {
+                let removed = lines.removeFirst()
+                totalBytes -= removed.utf8.count
+            }
         }
+
         handler = onLineAdded
         lock.unlock()
-        handler?(line)
+        handler?(rawLine)
     }
 
     public func getAllLines() -> [String] {
@@ -46,6 +67,7 @@ public final class LogRingBuffer: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         lines.removeAll()
+        totalBytes = 0
     }
 }
 
@@ -85,8 +107,8 @@ public enum ProcessSupervisorError: Error, LocalizedError, Sendable {
 /// Handles concurrent draining of stdout and stderr into a bounded ring buffer.
 public actor ProcessSupervisor {
     private var process: Process?
-    private var stdoutTask: Task<Void, Never>?
-    private var stderrTask: Task<Void, Never>?
+    private var stdoutPipe: Pipe?
+    private var stderrPipe: Pipe?
     private let logBuffer: LogRingBuffer
     private var terminationContinuation: CheckedContinuation<ProcessExitStatus, Never>?
     private var cancelled: Bool = false
@@ -110,7 +132,8 @@ public actor ProcessSupervisor {
         executableURL: URL,
         arguments: [String],
         workingDirectory: URL? = nil,
-        environment: [String: String] = [:]
+        environment: [String: String] = [:],
+        onSpawn: (@Sendable (Int32) -> Void)? = nil
     ) async throws -> ProcessExitStatus {
         guard !isRunning else {
             throw ProcessSupervisorError.processAlreadyRunning(activePID ?? -1)
@@ -135,34 +158,35 @@ public actor ProcessSupervisor {
         }
         p.environment = env
 
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        p.standardOutput = stdoutPipe
-        p.standardError = stderrPipe
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        p.standardOutput = outPipe
+        p.standardError = errPipe
+        self.stdoutPipe = outPipe
+        self.stderrPipe = errPipe
 
         let buffer = self.logBuffer
 
-        // Drain stdout asynchronously
-        stdoutTask = Task.detached {
-            let fileHandle = stdoutPipe.fileHandleForReading
-            do {
-                for try await line in fileHandle.bytes.lines {
+        // Asynchronous non-blocking readability handlers prevent buffer backpressure deadlocks (WN-02/WN-04)
+        outPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+            if let str = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .ascii) {
+                let lines = str.components(separatedBy: .newlines)
+                for line in lines where !line.isEmpty {
                     buffer.append("[STDOUT] " + line)
                 }
-            } catch {
-                // Pipe finished
             }
         }
 
-        // Drain stderr asynchronously
-        stderrTask = Task.detached {
-            let fileHandle = stderrPipe.fileHandleForReading
-            do {
-                for try await line in fileHandle.bytes.lines {
+        errPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+            if let str = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .ascii) {
+                let lines = str.components(separatedBy: .newlines)
+                for line in lines where !line.isEmpty {
                     buffer.append("[STDERR] " + line)
                 }
-            } catch {
-                // Pipe finished
             }
         }
 
@@ -172,7 +196,12 @@ public actor ProcessSupervisor {
             try p.run()
             self.activePID = p.processIdentifier
             buffer.append("[SUPERVISOR] Process started with PID: \(p.processIdentifier)")
+            onSpawn?(p.processIdentifier)
         } catch {
+            outPipe.fileHandleForReading.readabilityHandler = nil
+            errPipe.fileHandleForReading.readabilityHandler = nil
+            self.stdoutPipe = nil
+            self.stderrPipe = nil
             self.process = nil
             self.activePID = nil
             buffer.append("[SUPERVISOR] Failed to launch: \(error.localizedDescription)")
@@ -190,9 +219,27 @@ public actor ProcessSupervisor {
     }
 
     private func handleTermination(exitCode: Int32) async {
-        // Wait briefly for stdout and stderr pipe tasks to complete draining final lines
-        _ = await stdoutTask?.result
-        _ = await stderrTask?.result
+        // Stop readability handlers cleanly to release file handles
+        stdoutPipe?.fileHandleForReading.readabilityHandler = nil
+        stderrPipe?.fileHandleForReading.readabilityHandler = nil
+
+        // Drain any remaining bytes that arrived before EOF
+        if let outHandle = stdoutPipe?.fileHandleForReading {
+            let data = outHandle.readDataToEndOfFile()
+            if !data.isEmpty, let str = String(data: data, encoding: .utf8) {
+                for line in str.components(separatedBy: .newlines) where !line.isEmpty {
+                    logBuffer.append("[STDOUT] " + line)
+                }
+            }
+        }
+        if let errHandle = stderrPipe?.fileHandleForReading {
+            let data = errHandle.readDataToEndOfFile()
+            if !data.isEmpty, let str = String(data: data, encoding: .utf8) {
+                for line in str.components(separatedBy: .newlines) where !line.isEmpty {
+                    logBuffer.append("[STDERR] " + line)
+                }
+            }
+        }
 
         logBuffer.append("[SUPERVISOR] Process exited with status code: \(exitCode)")
         let status = ProcessExitStatus(exitCode: exitCode, wasCancelled: self.cancelled)
@@ -200,8 +247,8 @@ public actor ProcessSupervisor {
         terminationContinuation = nil
         process = nil
         activePID = nil
-        stdoutTask = nil
-        stderrTask = nil
+        stdoutPipe = nil
+        stderrPipe = nil
     }
 
     /// Gracefully requests termination via SIGTERM, then forces SIGKILL (and process group kill) if still running.
@@ -219,9 +266,12 @@ public actor ProcessSupervisor {
         }
 
         if p.isRunning {
-            logBuffer.append("[SUPERVISOR] Process did not exit gracefully, sending SIGKILL to process group...")
-            // Kill entire process group if running as group leader, otherwise target PID
-            kill(-pid, SIGKILL)
+            logBuffer.append("[SUPERVISOR] Process did not exit gracefully, sending SIGKILL...")
+            // Only kill process group if the process is verified to be the group leader (WN-04)
+            let pgid = getpgid(pid)
+            if pgid == pid {
+                kill(-pid, SIGKILL)
+            }
             kill(pid, SIGKILL)
         }
     }

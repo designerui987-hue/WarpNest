@@ -93,7 +93,26 @@ public actor MetadataStore {
             let data = try Data(contentsOf: fileURL)
             return try decoder.decode(type, from: data)
         } catch {
+            // WN-15 / N26: preserve corrupt data for recovery before failing
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime]
+            let corruptBackupURL = baseDirectory.appendingPathComponent(filename + ".corrupt." + formatter.string(from: Date()))
+            try? fileManager.copyItem(at: fileURL, to: corruptBackupURL)
             throw MetadataStoreError.decodingFailed(error.localizedDescription)
         }
+    }
+
+    // MARK: - Runtime Registry
+
+    private static let runtimeRegistryFilename = "runtimes.json"
+
+    /// Persists the full runtime registry to runtimes.json atomically.
+    public func saveRuntimeRegistry(_ runtimes: [PersistedRuntime]) throws {
+        try save(runtimes, to: MetadataStore.runtimeRegistryFilename)
+    }
+
+    /// Loads the runtime registry from runtimes.json, returning an empty array if not yet written.
+    public func loadRuntimeRegistry() throws -> [PersistedRuntime] {
+        try load([PersistedRuntime].self, from: MetadataStore.runtimeRegistryFilename, fallback: [])
     }
 }

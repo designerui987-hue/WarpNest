@@ -21,6 +21,7 @@ struct BottlesView: View {
 
                 Button {
                     createError = nil
+                    syncBackend = viewModel.appSettings.defaultSyncBackend
                     showingCreateBottleSheet = true
                 } label: {
                     Label("New Bottle", systemImage: "plus")
@@ -54,6 +55,7 @@ struct BottlesView: View {
 
                     Button("Create First Bottle") {
                         createError = nil
+                        syncBackend = viewModel.appSettings.defaultSyncBackend
                         showingCreateBottleSheet = true
                     }
                     .buttonStyle(.borderedProminent)
@@ -66,6 +68,16 @@ struct BottlesView: View {
                         HStack {
                             Text(bottle.name)
                                 .font(.headline)
+                            if bottle.runtimeID.rawValue == "test-simulation" {
+                                Text("SIMULATED")
+                                    .font(.caption2)
+                                    .bold()
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 2)
+                                    .background(Color.orange.opacity(0.2))
+                                    .foregroundColor(.orange)
+                                    .cornerRadius(4)
+                            }
                             Spacer()
                             Text(bottle.configuration.syncBackend.rawValue)
                                 .font(.caption)

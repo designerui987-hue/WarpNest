@@ -13,7 +13,7 @@ All contributors and participants are expected to adhere to our [Code of Conduct
 ## Development Setup
 
 1. Clone this repository locally.
-2. Ensure Xcode 15 or newer is installed with command-line tools.
+2. Ensure Xcode 16 or newer is installed with command-line tools (Swift 6 tools version required).
 3. Build the project using:
    ```bash
    swift build

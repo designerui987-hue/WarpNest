@@ -21,6 +21,22 @@
 - [x] **Archive & Traversal Safeguards**: Bottle backup preserves symlinks (`-y`); restore inspects archive contents via `zipinfo` to reject path traversal (`../`) and unmapped links.
 - [x] **Settings Persistence**: `AppSettings` model persisted to `settings.json`.
 
-### Milestone 4: End-to-End Windows Demonstration
+### Milestone 4: QA Review & Security Hardening (WN-01 through WN-15)
+- [x] **WN-01 / WN-12**: Executable path/cwd resolution, canonical validation, typed external installer paths, and WINEPREFIX protection.
+- [x] **WN-02**: Non-blocking concurrent pipe draining for `zip`, `zipinfo`, and `unzip`, eliminating deadlocks on large file collections.
+- [x] **WN-03**: Persisted runtime registry with stable collision-free IDs (`runtimes.json`), rehydration on cold start, and missing runtime handling.
+- [x] **WN-04**: Bounded process supervision, byte-limited log ring buffer (1 MB max), and process group safe kill.
+- [x] **WN-05**: Per-launch session IDs, `BottleLockLease` tokens, atomic reservation with failure rollback, and obsolete callback protection.
+- [x] **WN-06**: Shared application-scoped service container across all SwiftUI windows (`MainWindowView(viewModel: sharedViewModel)`).
+- [x] **WN-07**: Archive security: escaping symlink target inspection, traversal rejection, and Wine prefix structure validation.
+- [x] **WN-08**: Staged atomic backup replacement (`.staging_*.zip`) and honest filesystem error propagation during bottle deletion.
+- [x] **WN-09**: Clean unregistration of `TestRuntimeAdapter` when Developer Mode is disabled, and visual simulation badges.
+- [x] **WN-10**: Authoritative session state transitions (only mark `.running` after spawn succeeds) and live log streaming.
+- [x] **WN-11**: Bottle creation form uses persisted default sync backend.
+- [x] **WN-13**: Replaced mock tests with 19 comprehensive native tests in 4 suites using real archive fixtures (`../evil.txt`, symlinks), Unicode/spaces, and byte retention.
+- [x] **WN-14**: Development build designated as `0.2.0-alpha` targeting Apple Silicon ARM64; Intel support marked pending physical hardware test.
+- [x] **WN-15**: Backward-compatible decoding for legacy `d3dMetal` settings to `.dxvk`, corrupt metadata backup preservation, and dynamic architecture detection.
+
+### Milestone 5: End-to-End Windows Demonstration
 - [x] Simulated end-to-end integration test (`BottleAndLibraryTests.testEndToEndWorkflow`): Passed.
-- [ ] **Live Windows GUI App Launch on Host**: Blocked pending availability of a real Wine runtime on the host machine. Exhaustive search across `/Applications`, `/opt`, `/usr/local`, and user home confirmed `wine` is not pre-installed. The runtime import UI and validation logic are ready for use once a runtime bundle is provided.
+- [ ] **Live Windows GUI App Launch on Host**: Blocked pending availability of a real Wine runtime on the host machine. The runtime import UI and validation logic are ready for use once a runtime bundle is provided.

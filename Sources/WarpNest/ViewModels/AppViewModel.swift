@@ -38,14 +38,17 @@ public final class AppViewModel {
             self.appSettings = settings
         }
 
-        // Only register simulated test engine if developer mode is explicitly enabled
+        // Developer mode simulation adapter handling (WN-09)
+        let simulationID = RuntimeID("test-simulation")
         if appSettings.developerModeEnabled {
             let testAdapter = TestRuntimeAdapter()
             await bottleService.registerAdapter(testAdapter)
+        } else {
+            await bottleService.unregisterAdapter(id: simulationID)
         }
 
-        // Discover and validate real Wine runtimes
-        await discoverAndValidateRuntimes()
+        // Rehydrate persisted runtimes, then discover new Wine runtimes (WN-03)
+        await rehydrateAndDiscoverRuntimes()
 
         diagnostics = diagnosticsService.gatherDiagnostics()
         await reloadData()
@@ -55,7 +58,32 @@ public final class AppViewModel {
         try? await metadataStore.save(appSettings, to: "settings.json")
     }
 
-    public func discoverAndValidateRuntimes() async {
+    public func rehydrateAndDiscoverRuntimes() async {
+        var persisted = (try? await metadataStore.loadRuntimeRegistry()) ?? []
+        var registeredRoots = Set<String>()
+
+        // 1. Rehydrate previously saved runtimes
+        for entry in persisted {
+            registeredRoots.insert(URL(fileURLWithPath: entry.rootPath).resolvingSymlinksInPath().path)
+            let rootURL = URL(fileURLWithPath: entry.rootPath)
+
+            if FileManager.default.fileExists(atPath: rootURL.path),
+               let adapter = try? WineRuntimeAdapter(rootDirectory: rootURL, stableID: entry.id) {
+                if let isValid = try? await adapter.validate(), isValid {
+                    var verifiedAdapter = adapter
+                    verifiedAdapter.descriptor.version = entry.version != "unknown" ? entry.version : (await adapter.queryVersion() ?? "unknown")
+                    verifiedAdapter.descriptor.isVerified = true
+                    await bottleService.registerAdapter(verifiedAdapter)
+                } else {
+                    var unverified = adapter
+                    unverified.descriptor.isVerified = false
+                    unverified.descriptor.version = "Validation Failed"
+                    await bottleService.registerAdapter(unverified)
+                }
+            }
+        }
+
+        // 2. Discover standard candidate paths not yet registered
         let candidatePaths = [
             "/Applications/Wine Staging.app",
             "/Applications/Wine Devel.app",
@@ -64,35 +92,74 @@ public final class AppViewModel {
             "/opt/homebrew"
         ]
 
+        var newEntries: [PersistedRuntime] = []
         for path in candidatePaths {
-            let url = URL(fileURLWithPath: path)
+            let url = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+            guard !registeredRoots.contains(url.path) else { continue }
+
             if let adapter = try? WineRuntimeAdapter(rootDirectory: url) {
-                // Actually validate via wine --version!
                 if let isValid = try? await adapter.validate(), isValid {
                     var verifiedAdapter = adapter
-                    if let version = await adapter.queryVersion() {
-                        verifiedAdapter.descriptor.version = version
-                    }
+                    let ver = await adapter.queryVersion() ?? "unknown"
+                    verifiedAdapter.descriptor.version = ver
                     verifiedAdapter.descriptor.isVerified = true
                     await bottleService.registerAdapter(verifiedAdapter)
+
+                    let newPersisted = PersistedRuntime(
+                        id: verifiedAdapter.descriptor.id,
+                        displayName: verifiedAdapter.descriptor.name,
+                        executablePath: verifiedAdapter.wineExecutableURL.path,
+                        rootPath: url.path,
+                        version: ver,
+                        importedAt: Date(),
+                        isUserImported: false
+                    )
+                    newEntries.append(newPersisted)
+                    registeredRoots.insert(url.path)
                 }
             }
         }
+
+        if !newEntries.isEmpty {
+            persisted.append(contentsOf: newEntries)
+            try? await metadataStore.saveRuntimeRegistry(persisted)
+        }
+
         await updateRegisteredRuntimes()
+    }
+
+    public func discoverAndValidateRuntimes() async {
+        await rehydrateAndDiscoverRuntimes()
     }
 
     public func importRuntime(from url: URL) async throws {
         do {
-            let adapter = try WineRuntimeAdapter(rootDirectory: url)
+            let canonicalURL = url.resolvingSymlinksInPath()
+            let adapter = try WineRuntimeAdapter(rootDirectory: canonicalURL)
             guard try await adapter.validate() else {
                 throw RuntimeAdapterError.runtimeValidationFailed("The binary at \(url.path) failed executable validation or could not run.")
             }
             var verifiedAdapter = adapter
-            if let version = await adapter.queryVersion() {
-                verifiedAdapter.descriptor.version = version
-            }
+            let ver = await adapter.queryVersion() ?? "unknown"
+            verifiedAdapter.descriptor.version = ver
             verifiedAdapter.descriptor.isVerified = true
             await bottleService.registerAdapter(verifiedAdapter)
+
+            // Persist the user-imported runtime with its stable ID (WN-03)
+            var persisted = (try? await metadataStore.loadRuntimeRegistry()) ?? []
+            // Prevent duplicate root path registration
+            persisted.removeAll { URL(fileURLWithPath: $0.rootPath).resolvingSymlinksInPath().path == canonicalURL.path }
+            persisted.append(PersistedRuntime(
+                id: verifiedAdapter.descriptor.id,
+                displayName: verifiedAdapter.descriptor.name,
+                executablePath: verifiedAdapter.wineExecutableURL.path,
+                rootPath: canonicalURL.path,
+                version: ver,
+                importedAt: Date(),
+                isUserImported: true
+            ))
+            try? await metadataStore.saveRuntimeRegistry(persisted)
+
             await updateRegisteredRuntimes()
         } catch {
             showError("Failed to import runtime: \(error.localizedDescription)")
@@ -147,9 +214,19 @@ public final class AppViewModel {
         }
     }
 
-    public func addGame(name: String, bottleID: BottleID, executablePath: String) async throws {
+    public func addGame(
+        name: String,
+        bottleID: BottleID,
+        executablePath: String,
+        isExternalExecutable: Bool = false
+    ) async throws {
         do {
-            _ = try await libraryService.addGame(name: name, bottleID: bottleID, executableRelativePath: executablePath)
+            _ = try await libraryService.addGame(
+                name: name,
+                bottleID: bottleID,
+                executableRelativePath: executablePath,
+                isExternalExecutable: isExternalExecutable
+            )
             await reloadData()
         } catch {
             showError("Failed to add game: \(error.localizedDescription)")
@@ -158,16 +235,26 @@ public final class AppViewModel {
     }
 
     public func toggleGameSession(game: GameItem) async {
+        selectedGameID = game.id
         let currentState = activeSessionStates[game.id] ?? .stopped
         if currentState == .running {
             activeSessionStates[game.id] = .stopping
             await libraryService.stopGame(id: game.id)
-            activeSessionStates[game.id] = .stopped
         } else {
             activeSessionStates[game.id] = .preparing
+            // Attach live log listener for active game (WN-10)
+            let buffer = await libraryService.getLogBuffer(for: game.id)
+            buffer.setLineHandler { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    if self?.selectedGameID == game.id {
+                        self?.liveLogs = buffer.getAllLines()
+                    }
+                }
+            }
+
             do {
                 try await libraryService.launchGame(id: game.id)
-                activeSessionStates[game.id] = .running
+                // State transitions (.running, .failed, .stopped) are driven by the authoritative state listener (WN-10)
             } catch {
                 activeSessionStates[game.id] = .failed
                 showError("Launch error: \(error.localizedDescription)")

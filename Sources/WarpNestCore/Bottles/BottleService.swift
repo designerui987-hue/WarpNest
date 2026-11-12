@@ -36,11 +36,42 @@ public enum BottleServiceError: Error, LocalizedError, Sendable {
     }
 }
 
+/// Token representing an acquired lock lease on a bottle.
+public struct BottleLockLease: Sendable, Equatable {
+    public let id: UUID
+    public let bottleID: BottleID
+    public let reason: String
+
+    public init(id: UUID = UUID(), bottleID: BottleID, reason: String) {
+        self.id = id
+        self.bottleID = bottleID
+        self.reason = reason
+    }
+}
+
+/// Thread-safe accumulator for subprocess output draining (WN-02).
+private final class SubprocessOutputAccumulator: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data = Data()
+
+    func append(_ chunk: Data) {
+        lock.lock()
+        data.append(chunk)
+        lock.unlock()
+    }
+
+    func extractString() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+}
+
 /// Actor managing bottle directories, serialization of per-bottle operations, and safe backup/restore.
 public actor BottleService {
     private let metadataStore: MetadataStore
     private var bottles: [BottleID: Bottle] = [:]
-    private var activeLocks: [BottleID: String] = [:]
+    private var activeLocks: [BottleID: BottleLockLease] = [:]
     private var runtimeAdapters: [RuntimeID: any RuntimeAdapter] = [:]
 
     public init(metadataStore: MetadataStore) {
@@ -51,6 +82,10 @@ public actor BottleService {
         runtimeAdapters[adapter.descriptor.id] = adapter
     }
 
+    public func unregisterAdapter(id: RuntimeID) {
+        runtimeAdapters.removeValue(forKey: id)
+    }
+
     public func getAdapter(for id: RuntimeID) -> (any RuntimeAdapter)? {
         runtimeAdapters[id]
     }
@@ -59,20 +94,42 @@ public actor BottleService {
         Array(runtimeAdapters.values)
     }
 
-    public func lockBottle(id: BottleID, reason: String) throws {
+    /// Acquires an exclusive lock lease on a bottle with a unique owner token (WN-05).
+    public func acquireLock(id: BottleID, reason: String) throws -> BottleLockLease {
         if let existing = activeLocks[id] {
-            throw BottleServiceError.bottleBusy(id, existing)
+            throw BottleServiceError.bottleBusy(id, existing.reason)
         }
-        activeLocks[id] = reason
+        let lease = BottleLockLease(bottleID: id, reason: reason)
+        activeLocks[id] = lease
+        return lease
     }
 
-    public func unlockBottle(id: BottleID) {
-        activeLocks.removeValue(forKey: id)
+    /// Releases a lock only if the supplied lease matches the current active owner token (WN-05).
+    public func releaseLock(lease: BottleLockLease) -> Bool {
+        if let current = activeLocks[lease.bottleID], current.id == lease.id {
+            activeLocks.removeValue(forKey: lease.bottleID)
+            return true
+        }
+        return false
+    }
+
+    public func lockBottle(id: BottleID, reason: String) throws {
+        _ = try acquireLock(id: id, reason: reason)
+    }
+
+    public func unlockBottle(id: BottleID, leaseID: UUID? = nil) {
+        if let leaseID = leaseID {
+            if activeLocks[id]?.id == leaseID {
+                activeLocks.removeValue(forKey: id)
+            }
+        } else {
+            activeLocks.removeValue(forKey: id)
+        }
     }
 
     public func isBottleLocked(id: BottleID) -> (isLocked: Bool, reason: String?) {
         if let r = activeLocks[id] {
-            return (true, r)
+            return (true, r.reason)
         }
         return (false, nil)
     }
@@ -147,13 +204,72 @@ public actor BottleService {
         }
     }
 
+    /// Subprocess execution with continuous pipe draining to prevent pipe backpressure deadlocks (WN-02).
+    private func executeSubprocess(
+        executableURL: URL,
+        arguments: [String],
+        currentDirectoryURL: URL? = nil,
+        timeoutSeconds: TimeInterval = 120
+    ) async throws -> (exitCode: Int32, stdoutString: String, stderrString: String) {
+        let p = Process()
+        p.executableURL = executableURL
+        p.arguments = arguments
+        if let cwd = currentDirectoryURL {
+            p.currentDirectoryURL = cwd
+        }
+
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        p.standardOutput = outPipe
+        p.standardError = errPipe
+
+        let outAccumulator = SubprocessOutputAccumulator()
+        let errAccumulator = SubprocessOutputAccumulator()
+
+        outPipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            guard !chunk.isEmpty else { return }
+            outAccumulator.append(chunk)
+        }
+
+        errPipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            guard !chunk.isEmpty else { return }
+            errAccumulator.append(chunk)
+        }
+
+        do {
+            try p.run()
+        } catch {
+            outPipe.fileHandleForReading.readabilityHandler = nil
+            errPipe.fileHandleForReading.readabilityHandler = nil
+            throw error
+        }
+
+        let exitStatus: Int32 = await withCheckedContinuation { continuation in
+            p.terminationHandler = { proc in
+                continuation.resume(returning: proc.terminationStatus)
+            }
+        }
+
+        outPipe.fileHandleForReading.readabilityHandler = nil
+        errPipe.fileHandleForReading.readabilityHandler = nil
+
+        let remOut = outPipe.fileHandleForReading.readDataToEndOfFile()
+        let remErr = errPipe.fileHandleForReading.readDataToEndOfFile()
+        if !remOut.isEmpty { outAccumulator.append(remOut) }
+        if !remErr.isEmpty { errAccumulator.append(remErr) }
+
+        return (exitStatus, outAccumulator.extractString(), errAccumulator.extractString())
+    }
+
     /// Deletes a bottle only if it is completely idle and not running any games or active operations.
     public func deleteBottle(id: BottleID) async throws {
         guard let bottle = bottles[id] else {
             throw BottleServiceError.bottleNotFound(id)
         }
-        if let lockReason = activeLocks[id] {
-            throw BottleServiceError.bottleBusy(id, lockReason)
+        if let lock = activeLocks[id] {
+            throw BottleServiceError.bottleBusy(id, lock.reason)
         }
 
         try lockBottle(id: id, reason: "Deleting bottle")
@@ -165,7 +281,14 @@ public actor BottleService {
             try? await adapter.stopPrefix(at: url)
         }
 
-        try? FileManager.default.removeItem(at: url)
+        // WN-08: Propagate removal errors honestly; do not drop metadata if filesystem removal fails
+        if FileManager.default.fileExists(atPath: url.path) {
+            do {
+                try FileManager.default.removeItem(at: url)
+            } catch {
+                throw BottleServiceError.directoryNotEmpty("Failed to remove bottle directory at \(url.path): \(error.localizedDescription)")
+            }
+        }
         bottles.removeValue(forKey: id)
         try await persistBottles()
     }
@@ -178,13 +301,13 @@ public actor BottleService {
         Array(bottles.values).sorted { $0.name < $1.name }
     }
 
-    /// Backs up a stopped bottle into a zip archive with verified error propagation.
+    /// Backs up a stopped bottle into a zip archive with staged atomic replacement (WN-02, WN-08).
     public func backupBottle(id: BottleID, destinationZipURL: URL) async throws {
         guard let bottle = bottles[id] else {
             throw BottleServiceError.bottleNotFound(id)
         }
-        if let reason = activeLocks[id] {
-            throw BottleServiceError.bottleBusy(id, reason)
+        if let lock = activeLocks[id] {
+            throw BottleServiceError.bottleBusy(id, lock.reason)
         }
 
         try lockBottle(id: id, reason: "Exporting backup archive")
@@ -197,31 +320,40 @@ public actor BottleService {
 
         let parentDir = destinationZipURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
-        if FileManager.default.fileExists(atPath: destinationZipURL.path) {
-            try FileManager.default.removeItem(at: destinationZipURL)
+
+        // Stage backup to temporary file; only replace destination on success (WN-08 / N21)
+        let stagingZipURL = parentDir.appendingPathComponent(".staging_\(UUID().uuidString).zip")
+        defer {
+            try? FileManager.default.removeItem(at: stagingZipURL)
         }
 
-        // Use standard zip with symlink preservation (-y)
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
-        process.currentDirectoryURL = sourceURL
-        process.arguments = ["-r", "-y", destinationZipURL.path, "."]
+        // Include bottle configuration in archive for full round-trip preservation
+        let bottleMetaURL = sourceURL.appendingPathComponent("warpnest_bottle.json")
+        if let data = try? JSONEncoder().encode(bottle) {
+            try? data.write(to: bottleMetaURL)
+        }
 
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
+        // Non-blocking zip execution with concurrent pipe draining (WN-02)
+        let result = try await executeSubprocess(
+            executableURL: URL(fileURLWithPath: "/usr/bin/zip"),
+            arguments: ["-r", "-y", stagingZipURL.path, "."],
+            currentDirectoryURL: sourceURL
+        )
 
-        try process.run()
-        process.waitUntilExit()
+        guard result.exitCode == 0 else {
+            throw BottleServiceError.invalidBackupArchive("zip failed with code \(result.exitCode): \(result.stderrString)")
+        }
 
-        guard process.terminationStatus == 0 else {
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let errOutput = String(data: data, encoding: .utf8) ?? "Unknown zip error"
-            throw BottleServiceError.invalidBackupArchive("zip failed with code \(process.terminationStatus): \(errOutput)")
+        // Atomically replace destination archive so prior backup is never lost on failure
+        if FileManager.default.fileExists(atPath: destinationZipURL.path) {
+            _ = try FileManager.default.replaceItemAt(destinationZipURL, withItemAt: stagingZipURL)
+        } else {
+            try FileManager.default.moveItem(at: stagingZipURL, to: destinationZipURL)
         }
     }
 
-    /// Restores a bottle from a zip archive with strict path traversal checking and symlink validation.
+    /// Restores a bottle from a zip archive with strict path traversal checking, escaping symlink validation,
+    /// and prefix structure verification before registration (WN-02, WN-07, WN-08).
     public func restoreBottle(
         from zipURL: URL,
         restoredName: String,
@@ -231,21 +363,17 @@ public actor BottleService {
             throw BottleServiceError.invalidBackupArchive("Archive does not exist at \(zipURL.path)")
         }
 
-        // 1. Inspect archive entries to ensure no path begins with / or contains ../
-        let zipListProc = Process()
-        zipListProc.executableURL = URL(fileURLWithPath: "/usr/bin/zipinfo")
-        zipListProc.arguments = ["-1", zipURL.path]
-        let listPipe = Pipe()
-        zipListProc.standardOutput = listPipe
-        try zipListProc.run()
-        zipListProc.waitUntilExit()
+        // 1. Inspect archive table of contents via non-blocking zipinfo (WN-02, WN-07)
+        let listResult = try await executeSubprocess(
+            executableURL: URL(fileURLWithPath: "/usr/bin/zipinfo"),
+            arguments: ["-1", zipURL.path]
+        )
 
-        guard zipListProc.terminationStatus == 0 else {
-            throw BottleServiceError.invalidBackupArchive("Unable to read archive table of contents.")
+        guard listResult.exitCode == 0 else {
+            throw BottleServiceError.invalidBackupArchive("Unable to read archive table of contents: \(listResult.stderrString)")
         }
 
-        let listData = listPipe.fileHandleForReading.readDataToEndOfFile()
-        let fileEntries = (String(data: listData, encoding: .utf8) ?? "").components(separatedBy: .newlines)
+        let fileEntries = listResult.stdoutString.components(separatedBy: .newlines)
         for entry in fileEntries where !entry.isEmpty {
             if entry.hasPrefix("/") || entry.contains("../") || entry.contains("..\\") {
                 throw BottleServiceError.archiveTraversalDetected(entry)
@@ -257,27 +385,65 @@ public actor BottleService {
             .appendingPathComponent("Bottles", isDirectory: true)
             .appendingPathComponent("bottle_" + newID.rawValue.uuidString, isDirectory: true)
 
-        try FileManager.default.createDirectory(at: targetURL, withIntermediateDirectories: true)
-
-        let extractProc = Process()
-        extractProc.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-        extractProc.arguments = ["-q", zipURL.path, "-d", targetURL.path]
-
-        try extractProc.run()
-        extractProc.waitUntilExit()
-
-        guard extractProc.terminationStatus == 0 else {
-            try? FileManager.default.removeItem(at: targetURL)
-            throw BottleServiceError.invalidBackupArchive("Extraction failed with exit code \(extractProc.terminationStatus)")
+        let stagingURL = targetURL.appendingPathExtension("staging")
+        try FileManager.default.createDirectory(at: stagingURL, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: stagingURL)
         }
 
-        // Recover bottle configuration if included in archive, otherwise use defaults
+        // 2. Extract into staging directory using non-blocking unzip (WN-02)
+        let extractResult = try await executeSubprocess(
+            executableURL: URL(fileURLWithPath: "/usr/bin/unzip"),
+            arguments: ["-q", zipURL.path, "-d", stagingURL.path]
+        )
+
+        guard extractResult.exitCode == 0 else {
+            throw BottleServiceError.invalidBackupArchive("Extraction failed with exit code \(extractResult.exitCode): \(extractResult.stderrString)")
+        }
+
+        // 3. Inspect extracted links for link target traversal escapes (WN-07 / P04)
+        let canonicalStaging = stagingURL.resolvingSymlinksInPath()
+        let enumerator = FileManager.default.enumerator(
+            at: stagingURL,
+            includingPropertiesForKeys: [.isSymbolicLinkKey],
+            options: [.skipsPackageDescendants]
+        )
+
+        while let fileURL = enumerator?.nextObject() as? URL {
+            let res = try? fileURL.resourceValues(forKeys: [.isSymbolicLinkKey])
+            if res?.isSymbolicLink == true {
+                let resolvedTarget = fileURL.resolvingSymlinksInPath()
+                let targetPath = resolvedTarget.path
+                let stagingPath = canonicalStaging.path.hasSuffix("/") ? canonicalStaging.path : canonicalStaging.path + "/"
+
+                // Allow legitimate Wine dosdevices mappings (e.g. z: -> / or dosdevices internal links)
+                let isDosdevicesLink = fileURL.path.contains("/dosdevices/")
+                if !targetPath.hasPrefix(stagingPath) && !isDosdevicesLink {
+                    throw BottleServiceError.archiveTraversalDetected("Symlink at '\(fileURL.lastPathComponent)' targets outside restore root: \(targetPath)")
+                }
+            }
+        }
+
+        // 4. Validate prefix structure before registration (WN-07 / P06)
+        let hasDriveC = FileManager.default.fileExists(atPath: stagingURL.appendingPathComponent("drive_c").path)
+        let hasSystemReg = FileManager.default.fileExists(atPath: stagingURL.appendingPathComponent("system.reg").path)
+        let hasConfigMeta = FileManager.default.fileExists(atPath: stagingURL.appendingPathComponent("warpnest_bottle.json").path)
+
+        guard hasDriveC || hasSystemReg || hasConfigMeta else {
+            throw BottleServiceError.invalidBackupArchive("Archive does not contain a recognized Wine prefix structure (missing drive_c, system.reg, or bottle metadata)")
+        }
+
+        // 5. Recover bottle configuration if included in archive, otherwise use defaults
         var recoveredConfig = BottleConfiguration()
-        let archiveConfigURL = targetURL.appendingPathComponent("warpnest_bottle.json")
+        let archiveConfigURL = stagingURL.appendingPathComponent("warpnest_bottle.json")
         if let configData = try? Data(contentsOf: archiveConfigURL),
            let savedBottle = try? JSONDecoder().decode(Bottle.self, from: configData) {
             recoveredConfig = savedBottle.configuration
         }
+
+        // 6. Promote staging directory to published bottle path atomically
+        try FileManager.default.createDirectory(at: targetURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.moveItem(at: stagingURL, to: targetURL)
 
         let restoredBottle = Bottle(
             id: newID,
