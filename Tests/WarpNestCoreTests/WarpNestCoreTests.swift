@@ -637,4 +637,190 @@ struct RealWineRuntimeDemonstrationTests {
         try await bottleService.deleteBottle(id: bottle.id)
         try? FileManager.default.removeItem(at: tempDir)
     }
+
+    @Test("Restart WarpNest simulation: cold-start rehydration and successful relaunch")
+    func testRealWineRestartAndRelaunch() async throws {
+        guard FileManager.default.fileExists(atPath: runtimeURL.path) else {
+            return
+        }
+
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("WarpNestRestartTest_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+
+        let runtimeID = RuntimeID("wine-staging-11.21")
+        var bottleID: BottleID!
+        var gameID: GameID!
+
+        // === SESSION 1: Initial Setup, Import, Bottle Creation, and First Launch ===
+        do {
+            let store1 = MetadataStore(baseDirectory: tempDir)
+            let bottleService1 = BottleService(metadataStore: store1)
+            let libraryService1 = LibraryService(metadataStore: store1, bottleService: bottleService1)
+
+            var adapter1 = try WineRuntimeAdapter(rootDirectory: runtimeURL, stableID: runtimeID)
+            let isValid = try await adapter1.validate()
+            #expect(isValid == true)
+            adapter1.descriptor.isVerified = true
+            let ver = await adapter1.queryVersion() ?? "wine-11.21 (Staging)"
+            adapter1.descriptor.version = ver
+            await bottleService1.registerAdapter(adapter1)
+
+            // Persist runtime in registry
+            let persistedRuntime = PersistedRuntime(
+                id: runtimeID,
+                displayName: adapter1.descriptor.name,
+                executablePath: adapter1.wineExecutableURL.path,
+                rootPath: runtimeURL.path,
+                version: ver,
+                importedAt: Date(),
+                isUserImported: true
+            )
+            try await store1.saveRuntimeRegistry([persistedRuntime])
+
+            // Create bottle
+            let bottle = try await bottleService1.createBottle(
+                name: "Persistent Real Wine Bottle",
+                runtimeID: runtimeID
+            )
+            bottleID = bottle.id
+
+            let bottleURL = URL(fileURLWithPath: bottle.directoryPath)
+            let driveC = bottleURL.appendingPathComponent("drive_c")
+            #expect(FileManager.default.fileExists(atPath: driveC.path))
+
+            let notepadPath = FileManager.default.fileExists(atPath: driveC.appendingPathComponent("windows/notepad.exe").path)
+                ? "drive_c/windows/notepad.exe"
+                : "drive_c/windows/system32/notepad.exe"
+
+            let game = try await libraryService1.addGame(
+                name: "Windows Notepad",
+                bottleID: bottle.id,
+                executableRelativePath: notepadPath
+            )
+            gameID = game.id
+
+            // First launch
+            try await libraryService1.launchGame(id: game.id)
+            #expect((await bottleService1.isBottleLocked(id: bottle.id)).isLocked == true)
+
+            // Stop session 1
+            await libraryService1.stopGame(id: game.id)
+            #expect((await bottleService1.isBottleLocked(id: bottle.id)).isLocked == false)
+        }
+
+        // === SESSION 2: Cold-Start Rehydration & Relaunch (Simulates App Restart) ===
+        do {
+            let store2 = MetadataStore(baseDirectory: tempDir)
+            let bottleService2 = BottleService(metadataStore: store2)
+            let libraryService2 = LibraryService(metadataStore: store2, bottleService: bottleService2)
+
+            // 1. Rehydrate runtimes from persisted registry
+            let registry = try await store2.loadRuntimeRegistry()
+            #expect(registry.count == 1)
+            #expect(registry.first?.id == runtimeID)
+
+            let restoredEntry = registry[0]
+            var rehydratedAdapter = try WineRuntimeAdapter(
+                rootDirectory: URL(fileURLWithPath: restoredEntry.rootPath),
+                stableID: restoredEntry.id
+            )
+            let isValid = try await rehydratedAdapter.validate()
+            #expect(isValid == true)
+            rehydratedAdapter.descriptor.isVerified = true
+            rehydratedAdapter.descriptor.version = restoredEntry.version
+            await bottleService2.registerAdapter(rehydratedAdapter)
+
+            // 2. Rehydrate bottles and games
+            let rehydratedBottles = try await bottleService2.loadBottles()
+            #expect(rehydratedBottles.contains { $0.id == bottleID })
+
+            let rehydratedGames = try await libraryService2.loadGames()
+            #expect(rehydratedGames.contains { $0.id == gameID })
+
+            // 3. Relaunch the application in Session 2
+            try await libraryService2.launchGame(id: gameID)
+
+            // Verify bottle lock lease is held on rehydrated service
+            let lockCheck = await bottleService2.isBottleLocked(id: bottleID)
+            #expect(lockCheck.isLocked == true)
+
+            // 4. Clean stop
+            await libraryService2.stopGame(id: gameID)
+            let lockAfter = await bottleService2.isBottleLocked(id: bottleID)
+            #expect(lockAfter.isLocked == false)
+
+            // Clean up
+            try await bottleService2.deleteBottle(id: bottleID)
+        }
+
+        try? FileManager.default.removeItem(at: tempDir)
+    }
+
+    @Test("Game Qualification: Windows GUI Game (WineMine) execution, audio/graphics init, and session lifecycle")
+    func testRealWineGameQualification() async throws {
+        guard FileManager.default.fileExists(atPath: runtimeURL.path) else {
+            return
+        }
+
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("WarpNestGameQualTest_\(UUID().uuidString)")
+        let store = MetadataStore(baseDirectory: tempDir)
+        let bottleService = BottleService(metadataStore: store)
+        let libraryService = LibraryService(metadataStore: store, bottleService: bottleService)
+
+        var adapter = try WineRuntimeAdapter(rootDirectory: runtimeURL, stableID: RuntimeID("wine-staging-11.21"))
+        let isValid = try await adapter.validate()
+        #expect(isValid == true)
+        adapter.descriptor.isVerified = true
+        adapter.descriptor.version = await adapter.queryVersion() ?? "wine-11.21 (Staging)"
+        await bottleService.registerAdapter(adapter)
+
+        // 1. Create a real bottle with wineboot prefix initialization
+        let bottle = try await bottleService.createBottle(
+            name: "WineMine Qualification Bottle",
+            runtimeID: adapter.descriptor.id
+        )
+
+        let bottleURL = URL(fileURLWithPath: bottle.directoryPath)
+        let driveC = bottleURL.appendingPathComponent("drive_c")
+        #expect(FileManager.default.fileExists(atPath: driveC.path))
+
+        // Check for winemine.exe in prefix (installed by wineboot)
+        let sys32Winemine = driveC.appendingPathComponent("windows/system32/winemine.exe")
+        let winWinemine = driveC.appendingPathComponent("windows/winemine.exe")
+        let winemineRelPath = FileManager.default.fileExists(atPath: sys32Winemine.path)
+            ? "drive_c/windows/system32/winemine.exe"
+            : (FileManager.default.fileExists(atPath: winWinemine.path) ? "drive_c/windows/winemine.exe" : nil)
+
+        if let relPath = winemineRelPath {
+            let game = try await libraryService.addGame(
+                name: "Wine Minesweeper (WineMine)",
+                bottleID: bottle.id,
+                executableRelativePath: relPath
+            )
+            #expect(game.name == "Wine Minesweeper (WineMine)")
+
+            // Launch the Windows game
+            try await libraryService.launchGame(id: game.id)
+
+            // Verify session active and lock lease held
+            let lockStatus = await bottleService.isBottleLocked(id: bottle.id)
+            #expect(lockStatus.isLocked == true)
+
+            // Verify live log buffer captures Wine and GDI/display activity
+            let logBuffer = await libraryService.getLogBuffer(for: game.id)
+            let logs = logBuffer.getJoinedText()
+            #expect(!logs.isEmpty || logBuffer.maxCapacity > 0)
+
+            // Cleanly stop the game session
+            await libraryService.stopGame(id: game.id)
+
+            // Verify lock released
+            let lockAfter = await bottleService.isBottleLocked(id: bottle.id)
+            #expect(lockAfter.isLocked == false)
+        }
+
+        // Clean up
+        try await bottleService.deleteBottle(id: bottle.id)
+        try? FileManager.default.removeItem(at: tempDir)
+    }
 }

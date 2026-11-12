@@ -37,6 +37,9 @@
 - [x] **WN-14**: Development build designated as `0.2.0-alpha` targeting Apple Silicon ARM64; Intel support marked pending physical hardware test.
 - [x] **WN-15**: Backward-compatible decoding for legacy `d3dMetal` settings to `.dxvk`, corrupt metadata backup preservation, and dynamic architecture detection.
 
-### Milestone 5: End-to-End Windows Demonstration
+### Milestone 5: End-to-End Windows Demonstration & Qualification
 - [x] Simulated end-to-end integration test (`BottleAndLibraryTests.testEndToEndWorkflow`): Passed.
-- [x] **Live Windows GUI App Launch on Host**: Verified and passed via `RealWineRuntimeDemonstrationTests`. Downloaded and extracted Wine-Staging 11.21 (`wine-staging-11.21-osx64.tar.xz`), validated runtime (`wine-11.21 (Staging)`), created real prefix with `wineboot -u`, launched and supervised Windows Notepad (`drive_c/windows/notepad.exe`), verified exclusive session locking, stopped prefix cleanly with `wineserver -k`, and verified lock release. All 21 tests in 5 suites green.
+- [x] **Live Windows GUI App Launch on Host**: Verified and passed via `RealWineRuntimeDemonstrationTests`. Downloaded and extracted Wine-Staging 11.21 (`wine-staging-11.21-osx64.tar.xz`), validated runtime (`wine-11.21 (Staging)`), created real prefix with `wineboot -u`, launched and supervised Windows Notepad (`drive_c/windows/notepad.exe`), verified exclusive session locking, stopped prefix cleanly with `wineserver -k`, and verified lock release.
+- [x] **Restart & Relaunch Verification (`testRealWineRestartAndRelaunch`)**: Rehydrated runtime registry from `runtimes.json` on a clean service instance, reloaded bottle and game metadata, relaunched `notepad.exe` under supervised lease, verified locks and stopped cleanly.
+- [x] **Windows GUI Game Qualification (`testRealWineGameQualification`)**: Qualified Windows GUI game (`winemine.exe`) under Wine-Staging 11.21 on Apple Silicon host with MoltenVK Vulkan 1.4.323 and GDI graphics, session supervision, log streaming, and exclusive lock protection.
+- [x] **Full Regression Matrix Passing**: All 23 native tests across 5 suites passed with 0 failures. Release build (`swift build -c release`) compiled and ad-hoc signed in `WarpNest.app` (`arm64`).

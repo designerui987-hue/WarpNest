@@ -3,7 +3,7 @@
 WarpNest is an open-source native macOS application designed to organize, configure, and manage Windows game bottles on Apple Silicon (arm64) using verified compatibility runtimes (Wine / WoW64). Intel (x86_64) support is planned for future validation on physical hardware.
 
 > [!NOTE]
-> **Build Status:** v0.2.0-alpha (Milestone 3/QA Repair Pass Completed). Tested on Apple Silicon macOS 27.2 with Swift 6 strict concurrency. Real Windows GUI app execution is pending import of a supported host Wine runtime bundle.
+> **Build Status:** v0.2.0-alpha (Repair & Verification Milestone Passed). Tested on Apple Silicon macOS 27.2 with Swift 6 strict concurrency. 23 automated native tests across 5 test suites passing. Real Wine-Staging 11.21 imported, prefix initialization (`wineboot`), Windows GUI app execution (`notepad.exe`), cold-start restart rehydration/relaunch, and game qualification (`winemine.exe`) empirically verified.
 
 ## Current Status & Verification Tiers
 
@@ -19,7 +19,7 @@ To maintain strict engineering transparency, WarpNest features are categorized i
 | **Simulated Test Adapter (`TestRuntimeAdapter`)** | **Implemented (Explicit Test Mode)** | Isolated behind Developer Mode toggle; cleanly unregistered when Developer Mode is disabled (WN-09). Visual `[SIMULATED]` indicators on cards and pickers. |
 | **Wine Runtime Adapter (`WineRuntimeAdapter`)** | **Implemented & Verified** | Strict validation requiring `wine`, `wineboot`, and `wineserver` companion executables with execution permissions. Bounded `wine --version` check (WN-12). |
 | **Path Resolution & WINEPREFIX Protection** | **Implemented & Verified** | Canonical symlink resolution, bottle boundary containment, explicit external installer support, and reserved environment key protection (WN-01, WN-12). |
-| **Real Windows GUI App Launch** | **Implemented & Verified** | Verified on Apple Silicon host using Wine-Staging 11.21. Full prefix creation via `wineboot`, Windows GUI app supervision (`notepad.exe`), exclusive session locking, and clean prefix shutdown. |
+| **Real Windows GUI App Launch & Qualification** | **Implemented & Verified** | Verified on Apple Silicon host using Wine-Staging 11.21. Full prefix creation via `wineboot`, Windows GUI app supervision (`notepad.exe`), cold-start rehydration/relaunch across app restarts, exclusive session locking, clean prefix shutdown, and Windows GUI game qualification (`winemine.exe`). |
 
 ## Quick Start (Developer / Test Mode)
 

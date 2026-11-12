@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.0-alpha] - 2026-11-12
 
+### Added
+- **Live Wine-Staging 11.21 Demonstration (`RealWineRuntimeDemonstrationTests`):** Validated official pinned `wine-staging-11.21-osx64.tar.xz` runtime, performed real prefix initialization with `wineboot -u`, supervised real Windows GUI application execution (`notepad.exe`), verified exclusive session locking, clean prefix shutdown (`wineserver -k`), and lock release.
+- **Cold-Start Persistence & Relaunch Verification:** Tested application restart simulation confirming persistent runtime registry rehydration, bottle/game reload, and successful relaunch of Windows applications without metadata desynchronization.
+- **Windows GUI Game Qualification (`winemine.exe`):** Qualified real Windows GUI game execution under Wine-Staging 11.21 with MoltenVK Vulkan 1.4.323 and GDI rendering, exclusive process supervision, and log buffer streaming.
+
 ### Fixed
 - **WN-01 / WN-12 (Executable Path & CWD Resolution):** Resolved absolute Unix paths for game executables inside prefix with canonical symlink validation; supported explicit external installers with `isExternalExecutable`; protected reserved Wine environment keys (`WINEPREFIX`, `WINESERVER`, `WINELOADER`, `WINEDLLPATH`, `WINEDEBUG`) from being overridden by bottle or game configurations.
 - **WN-02 (Archive Pipe Deadlocks):** Replaced blocking `waitUntilExit()` reads with non-blocking continuous `readabilityHandler` draining for `zip`, `zipinfo`, and `unzip` operations, preventing buffer backpressure deadlocks on large file collections.

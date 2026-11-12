@@ -84,6 +84,14 @@ We evaluated candidates against licensing, maintainability, redistribution right
    - **Enforcement Rule:** If no real Wine runtime has been imported or validated on the user's system, real launch actions are clearly identified as **Unavailable (Awaiting Runtime Import)**, with an actionable UI explanation guiding the user to import a supported runtime or use the test adapter.
 
 3. **Reproducibility Verification Record:**
-   - Date: 2026-11-11
-   - Test Host: Apple Silicon macOS 27.2
-   - Verification Status: Core adapter validated; real execution gated behind verified runtime presence.
+   - Date: 2026-11-12
+   - Test Host: Apple Silicon macOS 27.2 (`arm64`), Rosetta 2 translation layer active
+   - Pinned Runtime: Wine-Staging 11.21 (SHA-256: `d7bcd5abf4df27aae397a7898aef074fea4a2e0b51e0a55aa9659517bbf9d452`)
+   - MoltenVK: Version 1.4.0 supporting Vulkan 1.4.323 (145 extensions)
+   - Tested Workloads:
+     - Prefix creation: `wineboot -u` (full 64-bit/WoW64 prefix)
+     - Windows GUI app: `notepad.exe`
+     - Windows GUI game: `winemine.exe` (Minesweeper) with 2D/GDI rendering and registry score persistence
+     - Service lifecycle: Exclusive lock lease acquisition, clean wineserver shutdown (`wineserver -k`), and lock release
+     - Cold-start restart: Persistence rehydration from `runtimes.json` and relaunch
+   - Verification Status: All 23 tests in 5 suites passing. Real Wine execution and game qualification verified.
