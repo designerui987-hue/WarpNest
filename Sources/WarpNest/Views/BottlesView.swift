@@ -1,5 +1,6 @@
 import SwiftUI
 import WarpNestCore
+import AppKit
 
 struct BottlesView: View {
     @Bindable var viewModel: AppViewModel
@@ -10,6 +11,19 @@ struct BottlesView: View {
     @State private var is64Bit: Bool = true
     @State private var createError: String?
 
+    // Backup & Restore state
+    @State private var showingRestoreSheet = false
+    @State private var restoreArchiveURL: URL?
+    @State private var restoreBottleName = ""
+    @State private var restoreRuntimeID: RuntimeID?
+    @State private var restoreError: String?
+    @State private var isBackingUp = false
+    @State private var isRestoring = false
+
+    // Deletion confirmation state
+    @State private var bottleToDelete: Bottle?
+    @State private var showingDeleteConfirmation = false
+
     var body: some View {
         VStack(spacing: 0) {
             HStack {
@@ -18,6 +32,25 @@ struct BottlesView: View {
                     .bold()
 
                 Spacer()
+
+                Button {
+                    let panel = NSOpenPanel()
+                    panel.canChooseFiles = true
+                    panel.canChooseDirectories = false
+                    panel.allowsMultipleSelection = false
+                    panel.allowedContentTypes = [.zip]
+                    panel.message = "Select a WarpNest bottle backup archive (.zip)"
+                    if panel.runModal() == .OK, let url = panel.url {
+                        restoreArchiveURL = url
+                        restoreBottleName = url.deletingPathExtension().lastPathComponent
+                        restoreRuntimeID = viewModel.registeredRuntimes.first(where: { $0.isVerified })?.id ?? viewModel.registeredRuntimes.first?.id
+                        restoreError = nil
+                        showingRestoreSheet = true
+                    }
+                } label: {
+                    Label("Restore Bottle...", systemImage: "arrow.clockwise.icloud")
+                }
+                .disabled(isRestoring)
 
                 Button {
                     createError = nil
@@ -96,15 +129,32 @@ struct BottlesView: View {
                                 .foregroundColor(.secondary)
                             Spacer()
 
-                            Button("Delete", role: .destructive) {
-                                Task {
-                                    do {
-                                        try await viewModel.bottleService.deleteBottle(id: bottle.id)
-                                        await viewModel.reloadData()
-                                    } catch {
-                                        viewModel.showError("Cannot delete bottle: \(error.localizedDescription)")
+                            Button {
+                                let panel = NSSavePanel()
+                                panel.canCreateDirectories = true
+                                panel.nameFieldStringValue = "\(bottle.name).zip"
+                                panel.allowedContentTypes = [.zip]
+                                panel.message = "Choose destination for bottle backup archive"
+                                if panel.runModal() == .OK, let dest = panel.url {
+                                    isBackingUp = true
+                                    Task {
+                                        do {
+                                            try await viewModel.backupBottle(id: bottle.id, to: dest)
+                                        } catch {
+                                            viewModel.showError("Backup failed: \(error.localizedDescription)")
+                                        }
+                                        isBackingUp = false
                                     }
                                 }
+                            } label: {
+                                Label("Backup...", systemImage: "arrow.down.doc")
+                            }
+                            .buttonStyle(.borderless)
+                            .disabled(isBackingUp)
+
+                            Button("Delete", role: .destructive) {
+                                bottleToDelete = bottle
+                                showingDeleteConfirmation = true
                             }
                             .buttonStyle(.borderless)
                             .foregroundColor(.red)
@@ -113,6 +163,95 @@ struct BottlesView: View {
                     .padding(.vertical, 8)
                 }
             }
+        }
+        .confirmationDialog(
+            "Delete Bottle?",
+            isPresented: $showingDeleteConfirmation,
+            titleVisibility: .visible,
+            presenting: bottleToDelete
+        ) { bottle in
+            Button("Delete '\(bottle.name)'", role: .destructive) {
+                Task {
+                    do {
+                        try await viewModel.bottleService.deleteBottle(id: bottle.id)
+                        await viewModel.reloadData()
+                    } catch {
+                        viewModel.showError("Cannot delete bottle: \(error.localizedDescription)")
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { bottle in
+            Text("Are you sure you want to delete '\(bottle.name)'? This permanently deletes the Windows prefix, installed games, and all local game saves. This action cannot be undone.")
+        }
+        .sheet(isPresented: $showingRestoreSheet) {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Restore Bottle from Backup")
+                    .font(.headline)
+
+                if let archive = restoreArchiveURL {
+                    Text("Archive: \(archive.lastPathComponent)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                TextField("Restored Bottle Name", text: $restoreBottleName)
+                    .textFieldStyle(.roundedBorder)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Target Runtime")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    Picker("Runtime", selection: $restoreRuntimeID) {
+                        ForEach(viewModel.registeredRuntimes) { r in
+                            Text("\(r.name) (\(r.version))\(r.isSimulation ? " [SIMULATED]" : (r.isVerified ? "" : " [UNVERIFIED]"))")
+                                .tag(r.id as RuntimeID?)
+                        }
+                    }
+                }
+
+                if let err = restoreError {
+                    Text(err)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+
+                HStack {
+                    Spacer()
+                    Button("Cancel") {
+                        showingRestoreSheet = false
+                    }
+                    Button("Restore") {
+                        guard let archiveURL = restoreArchiveURL else { return }
+                        let targetID = restoreRuntimeID ?? viewModel.registeredRuntimes.first?.id
+                        guard let runtimeID = targetID else {
+                            restoreError = "Please select a runtime."
+                            return
+                        }
+
+                        isRestoring = true
+                        Task {
+                            do {
+                                _ = try await viewModel.restoreBottle(
+                                    from: archiveURL,
+                                    name: restoreBottleName.isEmpty ? "Restored Bottle" : restoreBottleName,
+                                    runtimeID: runtimeID
+                                )
+                                showingRestoreSheet = false
+                                restoreError = nil
+                            } catch {
+                                restoreError = error.localizedDescription
+                            }
+                            isRestoring = false
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isRestoring || viewModel.registeredRuntimes.isEmpty)
+                }
+            }
+            .padding()
+            .frame(width: 440)
         }
         .sheet(isPresented: $showingCreateBottleSheet) {
             VStack(alignment: .leading, spacing: 16) {
@@ -135,7 +274,7 @@ struct BottlesView: View {
                         Picker("Runtime", selection: $selectedRuntimeID) {
                             Text("Select runtime...").tag(nil as RuntimeID?)
                             ForEach(viewModel.registeredRuntimes) { r in
-                                Text("\(r.name) (\(r.version))\(r.isSimulation ? " [SIMULATED]" : "")")
+                                Text("\(r.name) (\(r.version))\(r.isSimulation ? " [SIMULATED]" : (r.isVerified ? "" : " [UNVERIFIED]"))")
                                     .tag(r.id as RuntimeID?)
                             }
                         }

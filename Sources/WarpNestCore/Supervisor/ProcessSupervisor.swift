@@ -218,26 +218,45 @@ public actor ProcessSupervisor {
         }
     }
 
+    /// Reads any remaining unread bytes from the file descriptor non-blockingly and closes the handle.
+    private static func drainNonBlocking(handle: FileHandle?) -> String {
+        guard let handle = handle else { return "" }
+        let fd = handle.fileDescriptor
+        let flags = fcntl(fd, F_GETFL)
+        if flags >= 0 {
+            _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+        }
+        var accumulated = Data()
+        var buf = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let bytesRead = read(fd, &buf, buf.count)
+            if bytesRead > 0 {
+                accumulated.append(buf, count: bytesRead)
+            } else {
+                break
+            }
+        }
+        try? handle.close()
+        return String(data: accumulated, encoding: .utf8) ?? ""
+    }
+
     private func handleTermination(exitCode: Int32) async {
         // Stop readability handlers cleanly to release file handles
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
 
-        // Drain any remaining bytes that arrived before EOF
-        if let outHandle = stdoutPipe?.fileHandleForReading {
-            let data = outHandle.readDataToEndOfFile()
-            if !data.isEmpty, let str = String(data: data, encoding: .utf8) {
-                for line in str.components(separatedBy: .newlines) where !line.isEmpty {
-                    logBuffer.append("[STDOUT] " + line)
-                }
+        // Drain any remaining buffered bytes strictly non-blockingly (guards against hangs when child processes retain pipes)
+        let remOut = Self.drainNonBlocking(handle: stdoutPipe?.fileHandleForReading)
+        if !remOut.isEmpty {
+            for line in remOut.components(separatedBy: .newlines) where !line.isEmpty {
+                logBuffer.append("[STDOUT] " + line)
             }
         }
-        if let errHandle = stderrPipe?.fileHandleForReading {
-            let data = errHandle.readDataToEndOfFile()
-            if !data.isEmpty, let str = String(data: data, encoding: .utf8) {
-                for line in str.components(separatedBy: .newlines) where !line.isEmpty {
-                    logBuffer.append("[STDERR] " + line)
-                }
+
+        let remErr = Self.drainNonBlocking(handle: stderrPipe?.fileHandleForReading)
+        if !remErr.isEmpty {
+            for line in remErr.components(separatedBy: .newlines) where !line.isEmpty {
+                logBuffer.append("[STDERR] " + line)
             }
         }
 

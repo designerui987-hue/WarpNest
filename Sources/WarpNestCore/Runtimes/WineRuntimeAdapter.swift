@@ -242,4 +242,19 @@ public struct WineRuntimeAdapter: RuntimeAdapter {
             environment: ["WINEPREFIX": prefixURL.path]
         )
     }
+
+    public func isPrefixRunning(at prefixURL: URL) async -> Bool {
+        guard FileManager.default.fileExists(atPath: wineserverExecutableURL.path) else { return false }
+        let p = Process()
+        p.executableURL = wineserverExecutableURL
+        p.arguments = ["-k0"]
+        p.environment = ["WINEPREFIX": prefixURL.path]
+        do {
+            try p.run()
+            p.waitUntilExit()
+            return p.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
 }

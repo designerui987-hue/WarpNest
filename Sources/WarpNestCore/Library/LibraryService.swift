@@ -208,6 +208,9 @@ public actor LibraryService {
         guard let adapter = await bottleService.getAdapter(for: bottle.runtimeID) else {
             throw LibraryServiceError.runtimeUnavailable("Runtime adapter not registered for \(bottle.runtimeID)")
         }
+        guard adapter.descriptor.isVerified else {
+            throw LibraryServiceError.runtimeUnavailable("Runtime '\(adapter.descriptor.name)' is unverified or failed validation.")
+        }
 
         notifyStateChange(for: id, state: .preparing)
         let buffer = getLogBuffer(for: id)
@@ -304,6 +307,37 @@ public actor LibraryService {
 
     private func handleGameExit(sessionID: UUID, id: GameID, status: ProcessExitStatus) async {
         // WN-05: Ensure this completion corresponds to the active session, guarding against obsolete callbacks
+        guard let session = activeSessions[id], session.sessionID == sessionID else {
+            return
+        }
+
+        // Do not equate termination of the original launcher with termination of the game (Phase 1B).
+        // If wineserver or child processes are still running in this prefix, preserve the active session and lock.
+        if let bottle = await bottleService.getBottle(id: session.bottleID),
+           let adapter = await bottleService.getAdapter(for: bottle.runtimeID) {
+            let bottleURL = URL(fileURLWithPath: bottle.directoryPath)
+            if await adapter.isPrefixRunning(at: bottleURL) {
+                let buffer = getLogBuffer(for: id)
+                buffer.append("[SESSION] Launcher exited (status \(status.exitCode)), but prefix child processes are active. Preserving session lock...")
+                Task { [weak self] in
+                    while true {
+                        try? await Task.sleep(nanoseconds: 1_000_000_000)
+                        guard self != nil else { return }
+                        let isStillRunning = await adapter.isPrefixRunning(at: bottleURL)
+                        if !isStillRunning {
+                            break
+                        }
+                    }
+                    await self?.finalizeGameSession(sessionID: sessionID, id: id, status: status)
+                }
+                return
+            }
+        }
+
+        await finalizeGameSession(sessionID: sessionID, id: id, status: status)
+    }
+
+    private func finalizeGameSession(sessionID: UUID, id: GameID, status: ProcessExitStatus) async {
         guard let session = activeSessions[id], session.sessionID == sessionID else {
             return
         }

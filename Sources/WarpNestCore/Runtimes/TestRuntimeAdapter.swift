@@ -3,7 +3,7 @@ import Foundation
 /// Fast, deterministic mock/test adapter for unit testing and CI without requiring a 300MB external Wine runtime.
 /// Explicitly tagged with isSimulation = true so it is never presented as a real Wine compatibility runtime.
 public struct TestRuntimeAdapter: RuntimeAdapter {
-    public let descriptor: RuntimeDescriptor
+    public var descriptor: RuntimeDescriptor
     private let simulatedBinaryURL: URL
 
     public init(simulatedBinaryURL: URL = URL(fileURLWithPath: "/bin/echo")) {

@@ -135,7 +135,15 @@ public final class AppViewModel {
     public func importRuntime(from url: URL) async throws {
         do {
             let canonicalURL = url.resolvingSymlinksInPath()
-            let adapter = try WineRuntimeAdapter(rootDirectory: canonicalURL)
+            var persisted = (try? await metadataStore.loadRuntimeRegistry()) ?? []
+            
+            // P1: Preserve existing stable runtime ID if re-importing the same canonical root
+            let existingEntry = persisted.first {
+                URL(fileURLWithPath: $0.rootPath).resolvingSymlinksInPath().path == canonicalURL.path
+            }
+            let stableID = existingEntry?.id
+
+            let adapter = try WineRuntimeAdapter(rootDirectory: canonicalURL, stableID: stableID)
             guard try await adapter.validate() else {
                 throw RuntimeAdapterError.runtimeValidationFailed("The binary at \(url.path) failed executable validation or could not run.")
             }
@@ -146,8 +154,6 @@ public final class AppViewModel {
             await bottleService.registerAdapter(verifiedAdapter)
 
             // Persist the user-imported runtime with its stable ID (WN-03)
-            var persisted = (try? await metadataStore.loadRuntimeRegistry()) ?? []
-            // Prevent duplicate root path registration
             persisted.removeAll { URL(fileURLWithPath: $0.rootPath).resolvingSymlinksInPath().path == canonicalURL.path }
             persisted.append(PersistedRuntime(
                 id: verifiedAdapter.descriptor.id,
@@ -155,10 +161,11 @@ public final class AppViewModel {
                 executablePath: verifiedAdapter.wineExecutableURL.path,
                 rootPath: canonicalURL.path,
                 version: ver,
-                importedAt: Date(),
+                importedAt: existingEntry?.importedAt ?? Date(),
                 isUserImported: true
             ))
-            try? await metadataStore.saveRuntimeRegistry(persisted)
+            // Propagate persistence errors honestly instead of reporting false success
+            try await metadataStore.saveRuntimeRegistry(persisted)
 
             await updateRegisteredRuntimes()
         } catch {
@@ -266,6 +273,26 @@ public final class AppViewModel {
     public func updateLogs(for gameID: GameID) async {
         let buffer = await libraryService.getLogBuffer(for: gameID)
         liveLogs = buffer.getAllLines()
+    }
+
+    public func backupBottle(id: BottleID, to destinationURL: URL) async throws {
+        do {
+            try await bottleService.backupBottle(id: id, destinationZipURL: destinationURL)
+        } catch {
+            showError("Failed to backup bottle: \(error.localizedDescription)")
+            throw error
+        }
+    }
+
+    public func restoreBottle(from sourceURL: URL, name: String, runtimeID: RuntimeID) async throws -> Bottle {
+        do {
+            let bottle = try await bottleService.restoreBottle(from: sourceURL, restoredName: name, runtimeID: runtimeID)
+            await reloadData()
+            return bottle
+        } catch {
+            showError("Failed to restore bottle: \(error.localizedDescription)")
+            throw error
+        }
     }
 
     public func showError(_ message: String) {

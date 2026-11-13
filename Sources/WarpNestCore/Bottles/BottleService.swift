@@ -11,6 +11,7 @@ public enum BottleServiceError: Error, LocalizedError, Sendable {
     case archiveTraversalDetected(String)
     case configurationMismatch(String)
     case directoryNotEmpty(String)
+    case subprocessTimedOut(String)
 
     public var errorDescription: String? {
         switch self {
@@ -32,6 +33,8 @@ public enum BottleServiceError: Error, LocalizedError, Sendable {
             return "Configuration error: \(msg)"
         case .directoryNotEmpty(let path):
             return "Directory at path is not empty: \(path)"
+        case .subprocessTimedOut(let details):
+            return "Subprocess timed out: \(details)"
         }
     }
 }
@@ -204,8 +207,9 @@ public actor BottleService {
         }
     }
 
-    /// Subprocess execution with continuous pipe draining to prevent pipe backpressure deadlocks (WN-02).
-    private func executeSubprocess(
+    /// Subprocess execution with continuous pipe draining to prevent pipe backpressure deadlocks (WN-02)
+    /// and strict deadline enforcement (P2).
+    func executeSubprocess(
         executableURL: URL,
         arguments: [String],
         currentDirectoryURL: URL? = nil,
@@ -246,19 +250,74 @@ public actor BottleService {
             throw error
         }
 
+        final class SubprocessTimeoutState: @unchecked Sendable {
+            private let lock = NSLock()
+            private var timedOut = false
+            func setTimedOut() {
+                lock.lock()
+                timedOut = true
+                lock.unlock()
+            }
+            func isTimedOut() -> Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                return timedOut
+            }
+        }
+
+        let timeoutState = SubprocessTimeoutState()
+        let timeoutTask = Task {
+            let ns = UInt64(max(timeoutSeconds, 0.1) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: ns)
+            if p.isRunning {
+                timeoutState.setTimedOut()
+                p.terminate()
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                if p.isRunning {
+                    kill(p.processIdentifier, SIGKILL)
+                }
+            }
+        }
+
         let exitStatus: Int32 = await withCheckedContinuation { continuation in
             p.terminationHandler = { proc in
                 continuation.resume(returning: proc.terminationStatus)
             }
         }
+        timeoutTask.cancel()
 
         outPipe.fileHandleForReading.readabilityHandler = nil
         errPipe.fileHandleForReading.readabilityHandler = nil
 
-        let remOut = outPipe.fileHandleForReading.readDataToEndOfFile()
-        let remErr = errPipe.fileHandleForReading.readDataToEndOfFile()
+        // Strictly non-blocking drain of any remaining bytes in pipe buffers
+        func drainNonBlocking(handle: FileHandle) -> Data {
+            let fd = handle.fileDescriptor
+            let flags = fcntl(fd, F_GETFL)
+            if flags >= 0 {
+                _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+            }
+            var accumulated = Data()
+            var buf = [UInt8](repeating: 0, count: 4096)
+            while true {
+                let bytesRead = read(fd, &buf, buf.count)
+                if bytesRead > 0 {
+                    accumulated.append(buf, count: bytesRead)
+                } else {
+                    break
+                }
+            }
+            try? handle.close()
+            return accumulated
+        }
+
+        let remOut = drainNonBlocking(handle: outPipe.fileHandleForReading)
+        let remErr = drainNonBlocking(handle: errPipe.fileHandleForReading)
         if !remOut.isEmpty { outAccumulator.append(remOut) }
         if !remErr.isEmpty { errAccumulator.append(remErr) }
+
+        if timeoutState.isTimedOut() {
+            throw BottleServiceError.subprocessTimedOut("\(executableURL.lastPathComponent) exceeded deadline of \(Int(timeoutSeconds))s")
+        }
 
         return (exitStatus, outAccumulator.extractString(), errAccumulator.extractString())
     }
@@ -402,27 +461,7 @@ public actor BottleService {
         }
 
         // 3. Inspect extracted links for link target traversal escapes (WN-07 / P04)
-        let canonicalStaging = stagingURL.resolvingSymlinksInPath()
-        let enumerator = FileManager.default.enumerator(
-            at: stagingURL,
-            includingPropertiesForKeys: [.isSymbolicLinkKey],
-            options: [.skipsPackageDescendants]
-        )
-
-        while let fileURL = enumerator?.nextObject() as? URL {
-            let res = try? fileURL.resourceValues(forKeys: [.isSymbolicLinkKey])
-            if res?.isSymbolicLink == true {
-                let resolvedTarget = fileURL.resolvingSymlinksInPath()
-                let targetPath = resolvedTarget.path
-                let stagingPath = canonicalStaging.path.hasSuffix("/") ? canonicalStaging.path : canonicalStaging.path + "/"
-
-                // Allow legitimate Wine dosdevices mappings (e.g. z: -> / or dosdevices internal links)
-                let isDosdevicesLink = fileURL.path.contains("/dosdevices/")
-                if !targetPath.hasPrefix(stagingPath) && !isDosdevicesLink {
-                    throw BottleServiceError.archiveTraversalDetected("Symlink at '\(fileURL.lastPathComponent)' targets outside restore root: \(targetPath)")
-                }
-            }
-        }
+        try Self.validateRestoredSymbolicLinks(in: stagingURL)
 
         // 4. Validate prefix structure before registration (WN-07 / P06)
         let hasDriveC = FileManager.default.fileExists(atPath: stagingURL.appendingPathComponent("drive_c").path)
@@ -458,4 +497,45 @@ public actor BottleService {
         try await persistBottles()
         return restoredBottle
     }
+
+    /// Inspects every extracted link, including links inside macOS package directories.
+    static func validateRestoredSymbolicLinks(in directoryURL: URL) throws {
+        let canonicalStaging = directoryURL.resolvingSymlinksInPath()
+        var enumerationError: Error?
+        guard let enumerator = FileManager.default.enumerator(
+            at: canonicalStaging,
+            includingPropertiesForKeys: [.isSymbolicLinkKey],
+            options: [],
+            errorHandler: { _, error in
+                enumerationError = error
+                return false
+            }
+        ) else {
+            throw BottleServiceError.invalidBackupArchive("Cannot inspect extracted archive")
+        }
+
+        while let fileURL = enumerator.nextObject() as? URL {
+            let res = try fileURL.resourceValues(forKeys: [.isSymbolicLinkKey])
+            if res.isSymbolicLink == true {
+                let resolvedTarget = fileURL.resolvingSymlinksInPath()
+                let targetPath = resolvedTarget.path
+                let stagingPath = canonicalStaging.path.hasSuffix("/") ? canonicalStaging.path : canonicalStaging.path + "/"
+
+                // Only direct drive-letter mappings in the prefix's root dosdevices directory
+                // may target the host filesystem. Nested names must not inherit this exception.
+                let name = Array(fileURL.lastPathComponent.utf8)
+                let isDriveName = (name.count == 2 || name.count == 3)
+                    && ((97...122).contains(name[0]) || (65...90).contains(name[0]))
+                    && name.dropFirst().allSatisfy { $0 == 58 }
+                let isDosdevicesLink = isDriveName
+                    && fileURL.deletingLastPathComponent().resolvingSymlinksInPath().path
+                        == canonicalStaging.appendingPathComponent("dosdevices").resolvingSymlinksInPath().path
+                if targetPath != canonicalStaging.path && !targetPath.hasPrefix(stagingPath) && !isDosdevicesLink {
+                    throw BottleServiceError.archiveTraversalDetected("Symlink at '\(fileURL.lastPathComponent)' targets outside restore root: \(targetPath)")
+                }
+            }
+        }
+        if let enumerationError { throw enumerationError }
+    }
+
 }

@@ -82,4 +82,13 @@ public protocol RuntimeAdapter: Sendable {
 
     /// Stops any running wineserver or services associated with the prefix.
     func stopPrefix(at prefixURL: URL) async throws
+
+    /// Checks whether active prefix services (e.g. wineserver) are still running for the prefix.
+    func isPrefixRunning(at prefixURL: URL) async -> Bool
+}
+
+extension RuntimeAdapter {
+    public func isPrefixRunning(at prefixURL: URL) async -> Bool {
+        return false
+    }
 }

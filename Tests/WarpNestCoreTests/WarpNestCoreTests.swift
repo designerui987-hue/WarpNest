@@ -182,6 +182,25 @@ struct ProcessSupervisorTests {
         #expect(totalRetainedBytes <= 5000)
         #expect(!allLines.isEmpty)
     }
+
+    @Test("Process completion does not hang when descendant process retains pipes (P1 finding 3)")
+    func testSupervisorDoesNotHangWhenChildRetainsPipe() async throws {
+        let supervisor = ProcessSupervisor()
+        let shURL = URL(fileURLWithPath: "/bin/sh")
+        // Parent sh launches a subshell running sleep and exits immediately while child inherits stdout
+        let script = "(/bin/sleep 5 >&1) & exit 0"
+
+        let startTime = Date()
+        let status = try await supervisor.launch(
+            executableURL: shURL,
+            arguments: ["-c", script]
+        )
+        let elapsed = Date().timeIntervalSince(startTime)
+
+        // Supervisor must finish promptly after parent process exits without waiting for descendant sleep to finish
+        #expect(status.exitCode == 0)
+        #expect(elapsed < 3.0)
+    }
 }
 
 @Suite("Bottle & Library Integration Tests")
@@ -367,6 +386,88 @@ struct BottleAndLibraryTests {
 
         try? FileManager.default.removeItem(at: tempDir)
     }
+
+    @Test("Launch rejected when runtime is unverified (P2 finding 4)")
+    func testUnverifiedRuntimeLaunchRejection() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("WarpNestUnverifiedTest_\(UUID().uuidString)")
+        let store = MetadataStore(baseDirectory: tempDir)
+        let bottleService = BottleService(metadataStore: store)
+        let libraryService = LibraryService(metadataStore: store, bottleService: bottleService)
+
+        // Register adapter with isVerified = false
+        var unverifiedAdapter = TestRuntimeAdapter()
+        unverifiedAdapter.descriptor.isVerified = false
+        await bottleService.registerAdapter(unverifiedAdapter)
+
+        let bottle = Bottle(
+            id: BottleID(),
+            name: "Unverified Bottle",
+            runtimeID: unverifiedAdapter.descriptor.id,
+            directoryPath: tempDir.path
+        )
+        try await store.save([bottle], to: "bottles.json")
+        _ = try await bottleService.loadBottles()
+
+        let dummyExe = tempDir.appendingPathComponent("drive_c/game.exe")
+        try FileManager.default.createDirectory(at: dummyExe.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "fake binary".data(using: .utf8)?.write(to: dummyExe)
+
+        let game = try await libraryService.addGame(
+            name: "Test Game",
+            bottleID: bottle.id,
+            executableRelativePath: "drive_c/game.exe"
+        )
+
+        // Launch must fail because adapter is unverified
+        await #expect(throws: LibraryServiceError.self) {
+            try await libraryService.launchGame(id: game.id)
+        }
+
+        try? FileManager.default.removeItem(at: tempDir)
+    }
+
+    @Test("Runtime re-import preserves existing stable ID (P1 finding 2)")
+    func testRuntimeReimportPreservesID() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("WarpNestReimportTest_\(UUID().uuidString)")
+        let store = MetadataStore(baseDirectory: tempDir)
+
+        let runtimeRoot = tempDir.appendingPathComponent("WineApp.app")
+        let binDir = runtimeRoot.appendingPathComponent("bin")
+        try FileManager.default.createDirectory(at: binDir, withIntermediateDirectories: true)
+        let wineFile = binDir.appendingPathComponent("wine")
+        let winebootFile = binDir.appendingPathComponent("wineboot")
+        let wineserverFile = binDir.appendingPathComponent("wineserver")
+        try "#!/bin/sh\nexit 0\n".data(using: .utf8)?.write(to: wineFile)
+        try "#!/bin/sh\nexit 0\n".data(using: .utf8)?.write(to: winebootFile)
+        try "#!/bin/sh\nexit 0\n".data(using: .utf8)?.write(to: wineserverFile)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: wineFile.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: winebootFile.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: wineserverFile.path)
+
+        // First import
+        let originalID = RuntimeID("original-wine-id")
+        let initialPersisted = PersistedRuntime(
+            id: originalID,
+            displayName: "Test Wine",
+            executablePath: wineFile.path,
+            rootPath: runtimeRoot.resolvingSymlinksInPath().path,
+            version: "wine-test",
+            importedAt: Date(),
+            isUserImported: true
+        )
+        try await store.saveRuntimeRegistry([initialPersisted])
+
+        // Verify that looking up the existing canonical root reuses originalID
+        let persisted = try await store.loadRuntimeRegistry()
+        let canonicalPath = runtimeRoot.resolvingSymlinksInPath().path
+        let existing = persisted.first { URL(fileURLWithPath: $0.rootPath).resolvingSymlinksInPath().path == canonicalPath }
+        #expect(existing?.id == originalID)
+
+        let reimportedAdapter = try WineRuntimeAdapter(rootDirectory: runtimeRoot, stableID: existing?.id)
+        #expect(reimportedAdapter.descriptor.id == originalID)
+
+        try? FileManager.default.removeItem(at: tempDir)
+    }
 }
 
 @Suite("Archive Security & Integrity Tests")
@@ -446,6 +547,38 @@ struct ArchiveSecurityAndIntegrityTests {
         }
 
         try? FileManager.default.removeItem(at: tempDir)
+    }
+
+    @Test("Restore rejects external links hidden in packages or fake drive mappings", arguments: [
+        "drive_c/dosdevices/escape", "dosdevices/escape", "dosdevices/subdir/z:",
+        "drive_c/Hidden.app/Contents/escape"
+    ])
+    func testHiddenEscapingLinks(linkPath: String) async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("WarpNestHiddenLink_\(UUID())")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let prefix = tempDir.appendingPathComponent("prefix")
+        let link = prefix.appendingPathComponent(linkPath)
+        try FileManager.default.createDirectory(at: link.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: "/tmp")
+        do {
+            try BottleService.validateRestoredSymbolicLinks(in: prefix)
+            Issue.record("Validation accepted an escaping link at \(linkPath)")
+        } catch BottleServiceError.archiveTraversalDetected {
+            // Expected rejection by WarpNest, independently of unzip's own protections.
+        }
+    }
+
+    @Test("Restore validation preserves standard Wine drive mappings and internal links")
+    func testStandardWineDriveLinks() throws {
+        let prefix = FileManager.default.temporaryDirectory.appendingPathComponent("WarpNestDriveLinks_\(UUID())")
+        defer { try? FileManager.default.removeItem(at: prefix) }
+        try FileManager.default.createDirectory(at: prefix.appendingPathComponent("drive_c"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: prefix.appendingPathComponent("dosdevices"), withIntermediateDirectories: true)
+        for (path, target) in [("dosdevices/c:", "../drive_c"), ("dosdevices/z:", "/"), ("drive_c/internal", "../drive_c")] {
+            try FileManager.default.createSymbolicLink(atPath: prefix.appendingPathComponent(path).path, withDestinationPath: target)
+        }
+        try BottleService.validateRestoredSymbolicLinks(in: prefix)
     }
 
     @Test("Non-prefix archive (arbitrary ZIP) is rejected (WN-07 / P06 / N20)")
@@ -549,6 +682,28 @@ struct ArchiveSecurityAndIntegrityTests {
         try await bottleService.backupBottle(id: bottle.id, destinationZipURL: zipURL)
         let secondData = try Data(contentsOf: zipURL)
         #expect(!secondData.isEmpty)
+
+        try? FileManager.default.removeItem(at: tempDir)
+    }
+
+    @Test("Subprocess timeout deadline is strictly enforced (P2 finding 5)")
+    func testSubprocessTimeoutEnforcement() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("WarpNestTimeoutTest_\(UUID().uuidString)")
+        let store = MetadataStore(baseDirectory: tempDir)
+        let bottleService = BottleService(metadataStore: store)
+
+        let sleepURL = URL(fileURLWithPath: "/bin/sleep")
+        let startTime = Date()
+
+        await #expect(throws: BottleServiceError.self) {
+            _ = try await bottleService.executeSubprocess(
+                executableURL: sleepURL,
+                arguments: ["10"],
+                timeoutSeconds: 0.5
+            )
+        }
+        let elapsed = Date().timeIntervalSince(startTime)
+        #expect(elapsed < 2.5)
 
         try? FileManager.default.removeItem(at: tempDir)
     }

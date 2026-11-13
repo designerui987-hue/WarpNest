@@ -25,12 +25,19 @@ struct SettingsView: View {
                                         .background(Color.orange.opacity(0.2))
                                         .foregroundColor(.orange)
                                         .cornerRadius(4)
-                                } else {
+                                } else if r.isVerified {
                                     Text("Verified")
                                         .font(.caption2)
                                         .padding(3)
                                         .background(Color.green.opacity(0.2))
                                         .foregroundColor(.green)
+                                        .cornerRadius(4)
+                                } else {
+                                    Text("Unverified")
+                                        .font(.caption2)
+                                        .padding(3)
+                                        .background(Color.red.opacity(0.2))
+                                        .foregroundColor(.red)
                                         .cornerRadius(4)
                                 }
                             }
