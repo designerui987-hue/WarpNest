@@ -179,10 +179,10 @@ public actor LibraryService {
     }
 
     public func getSessionState(for id: GameID) async -> SessionState {
-        guard let session = activeSessions[id] else {
-            return .stopped
-        }
-        return await session.supervisor.isRunning ? .running : .stopped
+        // A session entry exists only while the game is active (launcher running or prefix
+        // processes surviving launcher exit). Its presence is authoritative; do not
+        // second-guess supervisor.isRunning which reflects only the original launcher PID.
+        return activeSessions[id] != nil ? .running : .stopped
     }
 
     public func getLogBuffer(for id: GameID) -> LogRingBuffer {
@@ -362,6 +362,9 @@ public actor LibraryService {
         notifyStateChange(for: id, state: .stopping)
         await session.supervisor.terminate()
 
+        // Verify the process actually stopped
+        let didStop = await session.supervisor.waitForExit(timeoutSeconds: 5.0)
+
         if let bottle = await bottleService.getBottle(id: session.bottleID),
            let adapter = await bottleService.getAdapter(for: bottle.runtimeID) {
             let bottleURL = URL(fileURLWithPath: bottle.directoryPath)
@@ -372,6 +375,7 @@ public actor LibraryService {
         guard let current = activeSessions[id], current.sessionID == sessionID else { return }
         _ = await bottleService.releaseLock(lease: session.lockLease)
         activeSessions.removeValue(forKey: id)
-        notifyStateChange(for: id, state: .stopped)
+        // Report .failed if we could not confirm process exit within the deadline
+        notifyStateChange(for: id, state: didStop ? .stopped : .failed)
     }
 }

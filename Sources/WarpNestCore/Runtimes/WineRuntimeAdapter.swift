@@ -216,6 +216,7 @@ public struct WineRuntimeAdapter: RuntimeAdapter {
 
         switch configuration.graphicsBackend {
         case .dxvk:
+            // NOTE: sets renderer hint only; does not install or verify DXVK
             env["WINE_D3D_CONFIG"] = "renderer=vulkan"
         case .wineD3D:
             env["WINE_D3D_CONFIG"] = "renderer=gl"

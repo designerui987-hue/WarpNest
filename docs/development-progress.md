@@ -1,11 +1,11 @@
 # WarpNest Development Progress
 
 ## Status Overview
-- **Active Phase:** Phase 1 — Reliability and Data Safety (Completed) → Transitioning to Phase 2
-- **Current Milestone:** Phase 1 Complete (Sub-Milestones 1.1, 1.2, 1.3 Verified)
+- **Active Phase:** Batch 1 Complete (Truthful Runtime & Correctness) → Transitioning to Phase 2 (Steam Workflow)
+- **Current Milestone:** Batch 1 Verified (36 tests passing across 6 suites)
 - **Repository Branch:** `repair/wn-fixes`
 - **Host Target:** macOS 27.2 (`arm64`), Apple Silicon, Swift 6 toolchain
-- **Automated Test Matrix:** 29 tests across 5 suites passing (`swift test`, 15.5s)
+- **Automated Test Matrix:** 36 tests across 6 suites passing (`swift test`, 44.8s)
 
 ---
 
@@ -34,6 +34,27 @@
   - **Exposed Backup & Restore in UI:** Added `viewModel.backupBottle` and `viewModel.restoreBottle` workflows to `AppViewModel`. Added "Restore Bottle..." button in `BottlesView` header and "Backup..." button per bottle card with native `NSOpenPanel`/`NSSavePanel`.
   - **Destructive Deletion Confirmation:** Added `.confirmationDialog` before bottle deletion in `BottlesView` detailing the permanent loss of prefixes, registry, and local game saves.
   - **Regression Test:** Added `testSubprocessTimeoutEnforcement` to `ArchiveSecurityAndIntegrityTests`. Confirmed subprocess killed and error thrown within 0.53s.
+
+### Batch 1: Correctness and Truthful Runtime Behavior (18 Nov 2026)
+- [x] **Simulation-Mode Registration Identity Alignment:**
+  - Standardized the mock simulation adapter ID on canonical `RuntimeID("test-simulation")` across `TestRuntimeAdapter` and `AppViewModel`.
+  - Disabling Developer Mode now accurately unregisters the adapter, preventing simulated launches and removing the mock adapter from UI selection.
+  - Regressions: Added `testDeveloperModeSimulationIDConsistency` and `testSimulatedLaunchRejectedWithoutAdapter`.
+- [x] **Truthful Graphics & Capability Claims:**
+  - Relabeled `GraphicsBackend.dxvk` to `"DXVK (not installed — sets renderer hint only)"` to eliminate deceptive claims of integrated Vulkan/Metal translation.
+  - Relabeled `GraphicsBackend.wineD3D` to `"WineD3D (built-in Wine D3D translation)"`.
+  - Added computed properties `isInstallRequired` and `capabilityNote` explaining configuration requirements in `BottlesView`.
+  - Added backward-compatible JSON decoding migration mapping legacy `d3dMetal`, `D3DMetal`, and verbose raw strings to their respective canonical enum cases.
+  - Regressions: Added `testDxvkIsNotClaimedAsInstalled` and `testLegacyGraphicsBackendStringDecoding`.
+- [x] **Authoritative Session State Lifecycle:**
+  - Updated `LibraryService.getSessionState(for:)` to treat session-entry presence in `activeSessions` as authoritative (`.running` vs `.stopped`), preventing erroneous `.stopped` reports during launcher exit when child/prefix activities continue.
+  - Scoped polling and teardown strictly to immutable session IDs (`UUID`) to discard stale callbacks.
+  - Regressions: Added `testSessionStateAuthoritativeDuringContinuation` and `testStaleCallbackDoesNotAffectNewerSession`.
+- [x] **Verifiable Shutdown & Process Termination:**
+  - Added `ProcessSupervisor.waitForExit(timeoutSeconds:)` polling with deadlines.
+  - Updated `LibraryService.stopGame(id:)` to verify actual process exit before releasing locks, transitioning state to `.failed` if shutdown cannot be confirmed within 5s.
+  - Handled stop requests arriving prior to process launch safely without crashing or leaking locks.
+  - Regression: Added `testStopBeforeSpawnIsNoop`.
 
 ---
 

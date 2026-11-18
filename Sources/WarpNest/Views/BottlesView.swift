@@ -8,6 +8,7 @@ struct BottlesView: View {
     @State private var newBottleName = ""
     @State private var selectedRuntimeID: RuntimeID?
     @State private var syncBackend: SyncBackend = .esync
+    @State private var graphicsBackend: GraphicsBackend = .automatic
     @State private var is64Bit: Bool = true
     @State private var createError: String?
 
@@ -292,6 +293,20 @@ struct BottlesView: View {
                     }
                 }
 
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Graphics Backend")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Picker("Graphics Backend", selection: $graphicsBackend) {
+                        ForEach(GraphicsBackend.allCases, id: \.self) { backend in
+                            Text(backend.displayName).tag(backend)
+                        }
+                    }
+                    Text(graphicsBackend.capabilityNote)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
                 Toggle("64-bit Architecture (WoW64)", isOn: $is64Bit)
 
                 if let err = createError {
@@ -314,7 +329,7 @@ struct BottlesView: View {
 
                         let config = BottleConfiguration(
                             win64: is64Bit,
-                            graphicsBackend: .automatic,
+                            graphicsBackend: graphicsBackend,
                             syncBackend: syncBackend,
                             highResolutionMode: viewModel.appSettings.defaultHighResolutionMode
                         )

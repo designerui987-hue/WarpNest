@@ -24,3 +24,7 @@ TestBottles/
 # Antigravity artifacts
 .gemini/
 .agents/
+
+# Scratch and local builds
+scratch/
+WarpNest.app/

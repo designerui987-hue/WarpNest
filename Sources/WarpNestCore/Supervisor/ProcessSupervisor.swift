@@ -298,4 +298,14 @@ public actor ProcessSupervisor {
     public func getLogs() -> [String] {
         logBuffer.getAllLines()
     }
+
+    /// Returns true if the process stopped within timeoutSeconds, false if it is still running.
+    public func waitForExit(timeoutSeconds: Double = 5.0) async -> Bool {
+        guard let p = process else { return true }
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while p.isRunning && Date() < deadline {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return !p.isRunning
+    }
 }

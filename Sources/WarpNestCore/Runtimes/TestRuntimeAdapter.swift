@@ -9,7 +9,7 @@ public struct TestRuntimeAdapter: RuntimeAdapter {
     public init(simulatedBinaryURL: URL = URL(fileURLWithPath: "/bin/echo")) {
         self.simulatedBinaryURL = simulatedBinaryURL
         self.descriptor = RuntimeDescriptor(
-            id: RuntimeID("test-adapter-v1"),
+            id: RuntimeID("test-simulation"),
             name: "WarpNest Simulated Test Engine",
             version: "1.0-simulated",
             rootPath: "/usr/bin",

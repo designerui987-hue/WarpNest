@@ -36,17 +36,39 @@ public struct RuntimeID: Hashable, Codable, Sendable, CustomStringConvertible {
 /// Graphics backend supported by a runtime or requested by a bottle.
 public enum GraphicsBackend: String, Codable, Sendable, CaseIterable {
     case automatic = "Automatic"
-    case dxvk = "DXVK (DirectX 9/10/11 -> Vulkan -> Metal)"
-    case wineD3D = "WineD3D (DirectX -> OpenGL/Metal)"
+    case dxvk = "DXVK (not installed — sets renderer hint only)"
+    case wineD3D = "WineD3D (built-in Wine D3D translation)"
 
     public var displayName: String { rawValue }
+
+    /// Whether the backend requires manual installation (not bundled by WarpNest).
+    public var isInstallRequired: Bool {
+        switch self {
+        case .dxvk: return true
+        case .wineD3D, .automatic: return false
+        }
+    }
+
+    /// Human-readable note describing capability limits and configuration behaviour.
+    public var capabilityNote: String {
+        switch self {
+        case .dxvk:
+            return "DXVK libraries must be installed manually in the bottle. This option sets WINE_D3D_CONFIG=renderer=vulkan only."
+        case .wineD3D:
+            return "Uses Wine's built-in D3D translation layer. No additional installation required."
+        case .automatic:
+            return "Uses the runtime's default graphics configuration."
+        }
+    }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
         let raw = try container.decode(String.self)
-        // Backward-compatible migration: map legacy d3dMetal / D3DMetal to DXVK (WN-15)
-        if raw == "d3dMetal" || raw == "D3DMetal" {
+        // Backward-compatible migration: map legacy d3dMetal / D3DMetal and prior verbose labels
+        if raw == "d3dMetal" || raw == "D3DMetal" || raw == "DXVK (DirectX 9/10/11 -> Vulkan -> Metal)" {
             self = .dxvk
+        } else if raw == "WineD3D (DirectX -> OpenGL/Metal)" {
+            self = .wineD3D
         } else if let match = GraphicsBackend(rawValue: raw) {
             self = match
         } else {
