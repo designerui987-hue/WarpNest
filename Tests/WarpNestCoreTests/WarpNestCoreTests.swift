@@ -34,9 +34,9 @@ struct MetadataStoreTests {
         try? FileManager.default.removeItem(at: tempDir)
     }
 
-    @Test("Legacy graphics backend migration (WN-15 / N26)")
+    @Test("Legacy graphics backend decoding preserves D3DMetal truthfully without silent substitution")
     func testLegacyGraphicsBackendMigration() async throws {
-        // Earlier WarpNest metadata containing "d3dMetal" should migrate smoothly to .dxvk
+        // Earlier WarpNest metadata containing "d3dMetal" should decode truthfully as .d3dMetal (not silently mapped to DXVK)
         let legacyJSON = """
         {
             "win64": true,
@@ -49,7 +49,8 @@ struct MetadataStoreTests {
         """.data(using: .utf8)!
 
         let decoded = try JSONDecoder().decode(BottleConfiguration.self, from: legacyJSON)
-        #expect(decoded.graphicsBackend == .dxvk)
+        #expect(decoded.graphicsBackend == .d3dMetal)
+        #expect(decoded.graphicsBackend.isSupported == false)
     }
 
     @Test("Corrupt metadata file preservation for recovery (WN-15 / N26)")

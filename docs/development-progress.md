@@ -1,11 +1,11 @@
 # WarpNest Development Progress
 
 ## Status Overview
-- **Active Phase:** Batch 1 Complete (Truthful Runtime & Correctness) → Transitioning to Phase 2 (Steam Workflow)
-- **Current Milestone:** Batch 1 Verified (36 tests passing across 6 suites)
-- **Repository Branch:** `repair/wn-fixes`
-- **Host Target:** macOS 27.2 (`arm64`), Apple Silicon, Swift 6 toolchain
-- **Automated Test Matrix:** 36 tests across 6 suites passing (`swift test`, 44.8s)
+- **Active Phase:** Batch 1 Complete (Truthful Runtime, Lifecycle & Shutdown Correctness) → Ready for Phase 2 (Steam Workflow)
+- **Current Milestone:** Batch 1 Verified & Hardened (40 tests passing across 6 suites)
+- **Repository Branch:** `main`
+- **Host Target:** macOS 14+ / Apple Silicon (`arm64`), Swift 6 toolchain
+- **Automated Test Matrix:** 40 tests across 6 suites passing (`swift test`, 16.2s)
 
 ---
 
@@ -21,7 +21,7 @@
   - **Honest Persistence Propagation:** Replaced `try?` with `try await metadataStore.saveRuntimeRegistry(persisted)` to bubble up filesystem failures.
   - **Enforce Runtime Verification at Launch:** In `LibraryService.launchGame`, added `guard adapter.descriptor.isVerified else { throw LibraryServiceError.runtimeUnavailable(...) }`.
   - **Accurate Status Display in UI:** Updated `SettingsView` to display `"Unverified"` in red when `r.isVerified == false` (no longer falsely labels unverified runtimes as `"Verified"`). Marked unverified runtimes in `BottlesView` picker.
-  - **Regression Tests:** Added `testRuntimeReimportPreservesID` and `testUnverifiedRuntimeLaunchRejection` to `BottleAndLibraryTests`. Both passed.
+  - **Regression Tests:** Added `testRuntimeReimportPreservesID` and `testUnverifiedRuntimeLaunchRejection` to `BottleAndLibraryTests`.
 
 - [x] **Sub-Milestone 1.2: Bounded Non-Blocking Output Draining & Process Lifecycle**
   - **Eliminated Descendant Pipe Hangs:** Replaced blocking `readDataToEndOfFile()` in `ProcessSupervisor.handleTermination` with POSIX `O_NONBLOCK` file descriptor draining (`drainNonBlocking`) and explicit handle closure.
@@ -35,32 +35,65 @@
   - **Destructive Deletion Confirmation:** Added `.confirmationDialog` before bottle deletion in `BottlesView` detailing the permanent loss of prefixes, registry, and local game saves.
   - **Regression Test:** Added `testSubprocessTimeoutEnforcement` to `ArchiveSecurityAndIntegrityTests`. Confirmed subprocess killed and error thrown within 0.53s.
 
-### Batch 1: Correctness and Truthful Runtime Behavior (18 Nov 2026)
-- [x] **Simulation-Mode Registration Identity Alignment:**
-  - Standardized the mock simulation adapter ID on canonical `RuntimeID("test-simulation")` across `TestRuntimeAdapter` and `AppViewModel`.
-  - Disabling Developer Mode now accurately unregisters the adapter, preventing simulated launches and removing the mock adapter from UI selection.
-  - Regressions: Added `testDeveloperModeSimulationIDConsistency` and `testSimulatedLaunchRejectedWithoutAdapter`.
-- [x] **Truthful Graphics & Capability Claims:**
-  - Relabeled `GraphicsBackend.dxvk` to `"DXVK (not installed — sets renderer hint only)"` to eliminate deceptive claims of integrated Vulkan/Metal translation.
-  - Relabeled `GraphicsBackend.wineD3D` to `"WineD3D (built-in Wine D3D translation)"`.
-  - Added computed properties `isInstallRequired` and `capabilityNote` explaining configuration requirements in `BottlesView`.
-  - Added backward-compatible JSON decoding migration mapping legacy `d3dMetal`, `D3DMetal`, and verbose raw strings to their respective canonical enum cases.
-  - Regressions: Added `testDxvkIsNotClaimedAsInstalled` and `testLegacyGraphicsBackendStringDecoding`.
-- [x] **Authoritative Session State Lifecycle:**
-  - Updated `LibraryService.getSessionState(for:)` to treat session-entry presence in `activeSessions` as authoritative (`.running` vs `.stopped`), preventing erroneous `.stopped` reports during launcher exit when child/prefix activities continue.
-  - Scoped polling and teardown strictly to immutable session IDs (`UUID`) to discard stale callbacks.
-  - Regressions: Added `testSessionStateAuthoritativeDuringContinuation` and `testStaleCallbackDoesNotAffectNewerSession`.
-- [x] **Verifiable Shutdown & Process Termination:**
-  - Added `ProcessSupervisor.waitForExit(timeoutSeconds:)` polling with deadlines.
-  - Updated `LibraryService.stopGame(id:)` to verify actual process exit before releasing locks, transitioning state to `.failed` if shutdown cannot be confirmed within 5s.
-  - Handled stop requests arriving prior to process launch safely without crashing or leaking locks.
-  - Regression: Added `testStopBeforeSpawnIsNoop`.
+### Batch 1: Correctness, Authoritative State, Task Cancellation & Truthful Capabilities (18-19 Nov 2026)
+- [x] **Bounded Shutdown Verification & Recovery (Item 1):**
+  - Replaced unverified stop and lock release with deterministic process and prefix exit verification (`waitForExit(5.0)` and `waitForPrefixInactivity(timeout: 5.0)`).
+  - Unsuppressed prefix stop errors in `WineRuntimeAdapter.stopPrefix(at:)` and verified `wineserver -k` status.
+  - On shutdown failure or timeout, `LibraryService` retains the session and bottle lock, transitioning to explicit `SessionState.stopFailed`.
+  - UI exposes a prominent red "Retry Stop" action in `LibraryView` when a session is in `stopFailed`.
+- [x] **Authoritative Stored Session State (Item 2):**
+  - Replaced fragile presence checks (`activeSessions[id] != nil => .running`) with an explicit stored `sessionStates: [GameID: SessionState]` dictionary in `LibraryService`.
+  - State transitions are published through `statePublisher` and strictly agree across queries and reactive subscribers across `.stopped`, `.preparing`, `.running`, `.stopping`, `.failed`, and `.stopFailed`.
+  - Immediate pre-flight rejections (e.g. unverified runtime) synchronously update state to `.failed` and notify listeners without leaving orphan preparation states.
+- [x] **Task Ownership, Scoping & Pre-Spawn Cancellation (Item 3):**
+  - Stored `launchTask` and `pollingTask` directly within `ActiveSession`.
+  - Scoped all asynchronous callbacks and lifecycle hooks to immutable session IDs (`UUID`), safely discarding delayed callbacks from older sessions.
+  - Calling `stopGame` while a game is still in `.preparing` cancels the `launchTask` immediately, aborting the process before spawn and releasing session locks.
+  - Playtime calculation and state finalization are guarded by atomic `isFinalized` ensuring exact-once execution across natural exits and manual stops.
+- [x] **Deterministic Regression Scenarios (Item 4):**
+  - Rewrote lifecycle tests using deterministic actors, mock processes, and sync gates rather than arbitrary `Task.sleep` timeouts:
+    1. Launcher exits while controlled prefix stays active, preserving session and lock.
+    2. Stop arriving during preparation prevents process spawn and clears session lock.
+    3. Session B is not disrupted by a delayed callback from session A.
+    4. Prefix shutdown failure preserves session and lock in recoverable Stop Failed state.
+    5. State queries accurately reflect preparing, stopping, and failure states.
+    6. Simulated launch rejected when developer mode adapter is unregistered.
+    7. Developer mode on/off in the same session uses consistent simulation ID.
+    8. Legacy runtimeID "test-adapter-v1" migrates to canonical simulation ID.
+    9. Mach-O architecture detection truthfully identifies binaries without hardcoding.
+    10. D3DMetal configuration throws unsupportedConfiguration on execution plan build.
+    11. Legacy D3DMetal decodes truthfully as `.d3dMetal` and is never silently substituted for DXVK.
+- [x] **Simulation Migration & Shared Constant (Item 5):**
+  - Defined canonical `RuntimeID.simulation = RuntimeID("test-simulation")` and `RuntimeID.legacySimulation = RuntimeID("test-adapter-v1")`.
+  - `Bottle.init(from decoder:)` and `BottleService.loadBottles()` transparently detect legacy `test-adapter-v1` and migrate persisted bottles and shortcuts to `.simulation`.
+  - `AppViewModel` unregisters both IDs when Developer Mode is toggled off.
+- [x] **Truthful Capabilities & Architecture Detection (Item 6):**
+  - Eliminated universal hardcoded `["x86_64", "arm64"]` claims in `WineRuntimeAdapter`; implemented direct Mach-O binary header inspection (`detectArchitectures(for:)`) using `lipo` / Mach-O magic numbers.
+  - Introduced explicit `GraphicsBackend.d3dMetal = "Apple D3DMetal (unsupported / not distributed)"` with `isSupported = false` and `isInstallRequired = true`.
+  - Stopped silently aliasing legacy D3DMetal configurations to DXVK hints; `WineRuntimeAdapter.buildExecutionPlan` throws `RuntimeAdapterError.unsupportedConfiguration` if D3DMetal is configured.
+  - Disabled unsupported graphics backends in the `BottlesView` picker and blocked bottle creation with unsupported options.
+  - Documented in `SettingsView` and `BottlesView` that Retina and Windows version settings depend on prefix-level Wine driver support.
+
+---
+
+## Verified Test Matrix Summary (Commit Baseline)
+- **Total Tests Executed:** 40
+- **Passing:** 40
+- **Failing:** 0
+- **Skipped / Untested:** 0
+- **Suites:**
+  - `WarpNestCore Metadata & Storage Tests` (6/6 passing)
+  - `Bottle & Library Integration Tests` (4/4 passing)
+  - `Archive Security & Integrity Tests` (7/7 passing)
+  - `Batch 1 Regression Tests` (11/11 passing)
+  - `ProcessSupervisor Tests` (6/6 passing)
+  - `Real Wine Runtime Demonstration Tests` (6/6 passing — real prefix creation, WineMine launch, lifecycle)
 
 ---
 
 ## Next Milestone
 - **Phase 2: Complete Steam Workflow**
-  - Dedicated Steam bottle creation with optimal defaults.
+  - Dedicated Steam bottle creation with optimal defaults (32/64-bit prefix, core fonts, msinstall).
   - Official installer download with SHA-256 integrity validation (`https://cdn.fastly.steamstatic.com/client/installer/SteamSetup.exe`).
   - Headless/silent installation handling and self-update progress tracking across process restarts.
   - Steam client shortcut registration and visual CEF login window verification.
