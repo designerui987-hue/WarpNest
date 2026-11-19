@@ -39,12 +39,13 @@ public final class AppViewModel {
         }
 
         // Developer mode simulation adapter handling (WN-09)
-        let simulationID = RuntimeID("test-simulation")
+        let simulationID = RuntimeID.simulation
         if appSettings.developerModeEnabled {
             let testAdapter = TestRuntimeAdapter()
             await bottleService.registerAdapter(testAdapter)
         } else {
             await bottleService.unregisterAdapter(id: simulationID)
+            await bottleService.unregisterAdapter(id: RuntimeID.legacySimulation)
         }
 
         // Rehydrate persisted runtimes, then discover new Wine runtimes (WN-03)
@@ -244,7 +245,7 @@ public final class AppViewModel {
     public func toggleGameSession(game: GameItem) async {
         selectedGameID = game.id
         let currentState = activeSessionStates[game.id] ?? .stopped
-        if currentState == .running {
+        if currentState == .running || currentState == .stopFailed {
             activeSessionStates[game.id] = .stopping
             await libraryService.stopGame(id: game.id)
         } else {

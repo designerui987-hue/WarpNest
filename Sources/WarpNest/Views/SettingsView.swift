@@ -93,6 +93,9 @@ struct SettingsView: View {
                     .onChange(of: viewModel.appSettings.defaultHighResolutionMode) { _, _ in
                         Task { await viewModel.saveSettings() }
                     }
+                Text("Stored configuration preference. Effective High-DPI rendering requires Wine Mac driver RetinaMode support in the prefix.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
             }
 
             Section("Storage & Paths") {

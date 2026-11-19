@@ -299,12 +299,12 @@ struct BottlesView: View {
                         .foregroundColor(.secondary)
                     Picker("Graphics Backend", selection: $graphicsBackend) {
                         ForEach(GraphicsBackend.allCases, id: \.self) { backend in
-                            Text(backend.displayName).tag(backend)
+                            Text(backend.displayName + (backend.isSupported ? "" : " (Unavailable)")).tag(backend)
                         }
                     }
                     Text(graphicsBackend.capabilityNote)
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(graphicsBackend.isSupported ? .secondary : .red)
                 }
 
                 Toggle("64-bit Architecture (WoW64)", isOn: $is64Bit)
@@ -324,6 +324,10 @@ struct BottlesView: View {
                         let targetRuntimeID = selectedRuntimeID ?? viewModel.registeredRuntimes.first?.id
                         guard let runtimeID = targetRuntimeID else {
                             createError = "Please select a verified runtime."
+                            return
+                        }
+                        guard graphicsBackend.isSupported else {
+                            createError = "Selected graphics backend is unavailable: \(graphicsBackend.displayName). Please choose Automatic or WineD3D."
                             return
                         }
 

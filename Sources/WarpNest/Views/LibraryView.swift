@@ -230,15 +230,17 @@ struct GameCardView: View {
 
             HStack {
                 let state = viewModel.activeSessionStates[game.id] ?? .stopped
-                let isRunning = state == .running
+                let isRunning = state == .running || state == .stopFailed
                 let isTransitioning = state == .preparing || state == .stopping
+                let buttonTitle = state == .stopFailed ? "Retry Stop" : (isRunning ? "Stop" : "Play")
+                let buttonIcon = isRunning ? "stop.fill" : "play.fill"
 
                 Button {
                     Task {
                         await viewModel.toggleGameSession(game: game)
                     }
                 } label: {
-                    Label(isRunning ? "Stop" : "Play", systemImage: isRunning ? "stop.fill" : "play.fill")
+                    Label(buttonTitle, systemImage: buttonIcon)
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -259,7 +261,7 @@ struct GameCardView: View {
         switch state {
         case .running: return .green
         case .preparing, .stopping: return .orange
-        case .failed: return .red
+        case .failed, .stopFailed: return .red
         case .stopped: return .gray
         }
     }
@@ -291,10 +293,11 @@ struct GameListRowView: View {
                 .font(.caption)
                 .foregroundColor(.secondary)
 
-            let isRunning = state == .running
+            let isRunning = state == .running || state == .stopFailed
             let isTransitioning = state == .preparing || state == .stopping
+            let buttonTitle = state == .stopFailed ? "Retry Stop" : (isRunning ? "Stop" : "Play")
 
-            Button(isRunning ? "Stop" : "Play") {
+            Button(buttonTitle) {
                 Task {
                     await viewModel.toggleGameSession(game: game)
                 }
