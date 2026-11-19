@@ -35,6 +35,10 @@ public struct ActiveSession: Sendable {
     public let lockLease: BottleLockLease
     public let supervisor: ProcessSupervisor
     public let startedAt: Date
+    public var state: SessionState
+    public var isFinalized: Bool
+    public var launchTask: Task<Void, Never>?
+    public var pollingTask: Task<Void, Never>?
 
     public init(
         sessionID: UUID = UUID(),
@@ -42,7 +46,11 @@ public struct ActiveSession: Sendable {
         bottleID: BottleID,
         lockLease: BottleLockLease,
         supervisor: ProcessSupervisor,
-        startedAt: Date = Date()
+        startedAt: Date = Date(),
+        state: SessionState = .preparing,
+        isFinalized: Bool = false,
+        launchTask: Task<Void, Never>? = nil,
+        pollingTask: Task<Void, Never>? = nil
     ) {
         self.sessionID = sessionID
         self.gameID = gameID
@@ -50,6 +58,10 @@ public struct ActiveSession: Sendable {
         self.lockLease = lockLease
         self.supervisor = supervisor
         self.startedAt = startedAt
+        self.state = state
+        self.isFinalized = isFinalized
+        self.launchTask = launchTask
+        self.pollingTask = pollingTask
     }
 }
 
@@ -59,8 +71,10 @@ public actor LibraryService {
     private let bottleService: BottleService
     private var games: [GameID: GameItem] = [:]
     private var activeSessions: [GameID: ActiveSession] = [:]
+    private var sessionStates: [GameID: SessionState] = [:]
     private var logBuffers: [GameID: LogRingBuffer] = [:]
     private var stateListeners: [GameID: @Sendable (SessionState) -> Void] = [:]
+    private var preSpawnHook: (@Sendable () async -> Void)?
 
     public init(metadataStore: MetadataStore, bottleService: BottleService) {
         self.metadataStore = metadataStore
@@ -71,7 +85,20 @@ public actor LibraryService {
         stateListeners[id] = listener
     }
 
+    public func setPreSpawnHook(_ hook: (@Sendable () async -> Void)?) {
+        self.preSpawnHook = hook
+    }
+
     public func notifyStateChange(for id: GameID, state: SessionState) {
+        transitionState(for: id, state: state)
+    }
+
+    private func transitionState(for id: GameID, state: SessionState) {
+        sessionStates[id] = state
+        if var session = activeSessions[id] {
+            session.state = state
+            activeSessions[id] = session
+        }
         stateListeners[id]?(state)
     }
 
@@ -167,6 +194,7 @@ public actor LibraryService {
         games.removeValue(forKey: id)
         logBuffers.removeValue(forKey: id)
         stateListeners.removeValue(forKey: id)
+        sessionStates.removeValue(forKey: id)
         try await persistGames()
     }
 
@@ -179,10 +207,7 @@ public actor LibraryService {
     }
 
     public func getSessionState(for id: GameID) async -> SessionState {
-        // A session entry exists only while the game is active (launcher running or prefix
-        // processes surviving launcher exit). Its presence is authoritative; do not
-        // second-guess supervisor.isRunning which reflects only the original launcher PID.
-        return activeSessions[id] != nil ? .running : .stopped
+        return sessionStates[id] ?? .stopped
     }
 
     public func getLogBuffer(for id: GameID) -> LogRingBuffer {
@@ -199,20 +224,24 @@ public actor LibraryService {
         guard let game = games[id] else {
             throw LibraryServiceError.gameNotFound(id)
         }
-        guard activeSessions[id] == nil else {
+        let currentState = sessionStates[id] ?? .stopped
+        guard currentState == .stopped || currentState == .failed else {
             throw LibraryServiceError.alreadyRunning(id)
         }
         guard let bottle = await bottleService.getBottle(id: game.bottleID) else {
+            transitionState(for: id, state: .failed)
             throw LibraryServiceError.bottleNotFound(game.bottleID)
         }
         guard let adapter = await bottleService.getAdapter(for: bottle.runtimeID) else {
+            transitionState(for: id, state: .failed)
             throw LibraryServiceError.runtimeUnavailable("Runtime adapter not registered for \(bottle.runtimeID)")
         }
         guard adapter.descriptor.isVerified else {
+            transitionState(for: id, state: .failed)
             throw LibraryServiceError.runtimeUnavailable("Runtime '\(adapter.descriptor.name)' is unverified or failed validation.")
         }
 
-        notifyStateChange(for: id, state: .preparing)
+        transitionState(for: id, state: .preparing)
         let buffer = getLogBuffer(for: id)
         buffer.append("[LAUNCH] Starting launch sequence for '\(game.name)' in bottle '\(bottle.name)'...")
 
@@ -223,22 +252,34 @@ public actor LibraryService {
         if game.isExternalExecutable {
             let externalURL = URL(fileURLWithPath: game.executableRelativePath).resolvingSymlinksInPath()
             guard FileManager.default.fileExists(atPath: externalURL.path) else {
+                transitionState(for: id, state: .failed)
                 throw LibraryServiceError.executableNotFound(externalURL.path)
             }
             resolvedExeURL = externalURL
         } else {
-            resolvedExeURL = try resolveAndValidateExecutable(
-                relativePath: game.executableRelativePath,
-                bottleURL: bottleURL
-            )
+            do {
+                resolvedExeURL = try resolveAndValidateExecutable(
+                    relativePath: game.executableRelativePath,
+                    bottleURL: bottleURL
+                )
+            } catch {
+                transitionState(for: id, state: .failed)
+                throw error
+            }
         }
 
-        let execPlan = try adapter.buildExecutionPlan(
-            prefixURL: bottleURL,
-            executablePath: resolvedExeURL.path,
-            arguments: game.arguments,
-            configuration: bottle.configuration
-        )
+        let execPlan: (executableURL: URL, arguments: [String], environment: [String: String])
+        do {
+            execPlan = try adapter.buildExecutionPlan(
+                prefixURL: bottleURL,
+                executablePath: resolvedExeURL.path,
+                arguments: game.arguments,
+                configuration: bottle.configuration
+            )
+        } catch {
+            transitionState(for: id, state: .failed)
+            throw error
+        }
 
         // Lock bottle exclusively for this active game session (WN-05)
         let lockLease: BottleLockLease
@@ -248,6 +289,7 @@ public actor LibraryService {
                 reason: "Game session '\(game.name)' is running"
             )
         } catch {
+            transitionState(for: id, state: .failed)
             throw LibraryServiceError.bottleBusy(game.bottleID, "Bottle is currently locked by another operation")
         }
 
@@ -261,14 +303,14 @@ public actor LibraryService {
 
         let sessionID = UUID()
         let supervisor = ProcessSupervisor(logBuffer: buffer)
-        let session = ActiveSession(
+        var session = ActiveSession(
             sessionID: sessionID,
             gameID: id,
             bottleID: game.bottleID,
             lockLease: lockLease,
-            supervisor: supervisor
+            supervisor: supervisor,
+            state: .preparing
         )
-        activeSessions[id] = session
 
         var env = execPlan.environment
         // WN-12: strip reserved Wine env keys from game overrides to prevent WINEPREFIX hijacking.
@@ -276,7 +318,13 @@ public actor LibraryService {
             env[k] = v
         }
 
-        Task { [weak self] in
+        let launchTask = Task { [weak self] in
+            guard !Task.isCancelled else { return }
+            if let hook = await self?.preSpawnHook {
+                await hook()
+            }
+            guard !Task.isCancelled else { return }
+            guard let self = self, await self.verifySessionActive(id: id, sessionID: sessionID) else { return }
             do {
                 let status = try await supervisor.launch(
                     executableURL: execPlan.executableURL,
@@ -285,18 +333,22 @@ public actor LibraryService {
                     environment: env,
                     onSpawn: { [weak self] _ in
                         Task { [weak self] in
-                            // WN-10: Only emit .running once spawn actually succeeds
-                            await self?.notifyStateChange(for: id, state: .running)
+                            guard let self = self else { return }
+                            if await self.verifySessionActive(id: id, sessionID: sessionID) {
+                                await self.transitionState(for: id, state: .running)
+                            }
                         }
                     }
                 )
-                await self?.handleGameExit(sessionID: sessionID, id: id, status: status)
+                await self.handleGameExit(sessionID: sessionID, id: id, status: status)
             } catch {
                 buffer.append("[LAUNCH ERROR] \(error.localizedDescription)")
-                await self?.notifyStateChange(for: id, state: .failed)
-                await self?.handleGameExit(sessionID: sessionID, id: id, status: ProcessExitStatus(exitCode: -1))
+                await self.handleLaunchFailure(sessionID: sessionID, id: id, error: error)
             }
         }
+
+        session.launchTask = launchTask
+        activeSessions[id] = session
 
         // Update last played timestamp
         var updated = game
@@ -305,9 +357,23 @@ public actor LibraryService {
         try? await persistGames()
     }
 
+    private func verifySessionActive(id: GameID, sessionID: UUID) -> Bool {
+        guard let s = activeSessions[id], s.sessionID == sessionID, !s.isFinalized else { return false }
+        return s.state != .stopping && s.state != .stopped
+    }
+
+    private func handleLaunchFailure(sessionID: UUID, id: GameID, error: Error) async {
+        guard let session = activeSessions[id], session.sessionID == sessionID, !session.isFinalized else {
+            return
+        }
+        _ = await bottleService.releaseLock(lease: session.lockLease)
+        activeSessions.removeValue(forKey: id)
+        transitionState(for: id, state: .failed)
+    }
+
     private func handleGameExit(sessionID: UUID, id: GameID, status: ProcessExitStatus) async {
         // WN-05: Ensure this completion corresponds to the active session, guarding against obsolete callbacks
-        guard let session = activeSessions[id], session.sessionID == sessionID else {
+        guard let session = activeSessions[id], session.sessionID == sessionID, !session.isFinalized else {
             return
         }
 
@@ -319,17 +385,24 @@ public actor LibraryService {
             if await adapter.isPrefixRunning(at: bottleURL) {
                 let buffer = getLogBuffer(for: id)
                 buffer.append("[SESSION] Launcher exited (status \(status.exitCode)), but prefix child processes are active. Preserving session lock...")
-                Task { [weak self] in
-                    while true {
-                        try? await Task.sleep(nanoseconds: 1_000_000_000)
+                
+                let pollingTask = Task { [weak self] in
+                    while !Task.isCancelled {
+                        try? await Task.sleep(nanoseconds: 200_000_000)
                         guard self != nil else { return }
                         let isStillRunning = await adapter.isPrefixRunning(at: bottleURL)
                         if !isStillRunning {
                             break
                         }
                     }
-                    await self?.finalizeGameSession(sessionID: sessionID, id: id, status: status)
+                    if !Task.isCancelled {
+                        await self?.finalizeGameSession(sessionID: sessionID, id: id, status: status)
+                    }
                 }
+                
+                var updatedSession = session
+                updatedSession.pollingTask = pollingTask
+                activeSessions[id] = updatedSession
                 return
             }
         }
@@ -338,9 +411,11 @@ public actor LibraryService {
     }
 
     private func finalizeGameSession(sessionID: UUID, id: GameID, status: ProcessExitStatus) async {
-        guard let session = activeSessions[id], session.sessionID == sessionID else {
+        guard var session = activeSessions[id], session.sessionID == sessionID, !session.isFinalized else {
             return
         }
+        session.isFinalized = true
+        activeSessions[id] = session
 
         let duration = Date().timeIntervalSince(session.startedAt)
         if var game = games[id] {
@@ -352,30 +427,69 @@ public actor LibraryService {
         // Unlock bottle with matching lease token
         _ = await bottleService.releaseLock(lease: session.lockLease)
         activeSessions.removeValue(forKey: id)
-        notifyStateChange(for: id, state: status.exitCode == 0 ? .stopped : .failed)
+        transitionState(for: id, state: status.exitCode == 0 ? .stopped : .failed)
     }
 
     /// Stops a running game session and stops associated prefix services (wineserver -k).
     public func stopGame(id: GameID) async {
-        guard let session = activeSessions[id] else { return }
+        guard let session = activeSessions[id], !session.isFinalized else { return }
         let sessionID = session.sessionID
-        notifyStateChange(for: id, state: .stopping)
+
+        // Cancel pending launch or polling tasks immediately
+        session.launchTask?.cancel()
+        session.pollingTask?.cancel()
+
+        transitionState(for: id, state: .stopping)
+
+        // If the process was still in preparation (not yet spawned), abort and release lock cleanly
+        let isSuperRunning = await session.supervisor.isRunning
+        if session.state == .preparing && !isSuperRunning {
+            await session.supervisor.terminate()
+            _ = await bottleService.releaseLock(lease: session.lockLease)
+            activeSessions.removeValue(forKey: id)
+            transitionState(for: id, state: .stopped)
+            return
+        }
+
         await session.supervisor.terminate()
 
-        // Verify the process actually stopped
-        let didStop = await session.supervisor.waitForExit(timeoutSeconds: 5.0)
+        // Bounded verification that the direct process stopped
+        let procStopped = await session.supervisor.waitForExit(timeoutSeconds: 5.0)
 
+        // Bounded stop and verification of prefix services
+        var prefixStopped = true
         if let bottle = await bottleService.getBottle(id: session.bottleID),
            let adapter = await bottleService.getAdapter(for: bottle.runtimeID) {
             let bottleURL = URL(fileURLWithPath: bottle.directoryPath)
-            try? await adapter.stopPrefix(at: bottleURL)
+            do {
+                try await adapter.stopPrefix(at: bottleURL)
+            } catch {
+                prefixStopped = false
+            }
+            let deadline = Date().addingTimeInterval(5.0)
+            while await adapter.isPrefixRunning(at: bottleURL) && Date() < deadline {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            if await adapter.isPrefixRunning(at: bottleURL) {
+                prefixStopped = false
+            }
         }
 
-        // WN-05: Only unlock and clear session if it still matches the stopped session ID
-        guard let current = activeSessions[id], current.sessionID == sessionID else { return }
-        _ = await bottleService.releaseLock(lease: session.lockLease)
-        activeSessions.removeValue(forKey: id)
-        // Report .failed if we could not confirm process exit within the deadline
-        notifyStateChange(for: id, state: didStop ? .stopped : .failed)
+        // WN-05: Ensure session is still matching and not previously finalized
+        guard let current = activeSessions[id], current.sessionID == sessionID, !current.isFinalized else {
+            if sessionStates[id] == .stopping {
+                transitionState(for: id, state: .stopped)
+            }
+            return
+        }
+
+        if procStopped && prefixStopped {
+            await finalizeGameSession(sessionID: sessionID, id: id, status: ProcessExitStatus(exitCode: 0, wasCancelled: true))
+        } else {
+            // Failure or unknown shutdown status: PRESERVE session and bottle lock for recovery!
+            let buffer = getLogBuffer(for: id)
+            buffer.append("[STOP ERROR] Shutdown could not be confirmed (procStopped=\(procStopped), prefixStopped=\(prefixStopped)). Session lock retained.")
+            transitionState(for: id, state: .stopFailed)
+        }
     }
 }
