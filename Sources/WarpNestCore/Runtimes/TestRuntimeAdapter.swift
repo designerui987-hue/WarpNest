@@ -9,14 +9,14 @@ public struct TestRuntimeAdapter: RuntimeAdapter {
     public init(simulatedBinaryURL: URL = URL(fileURLWithPath: "/bin/echo")) {
         self.simulatedBinaryURL = simulatedBinaryURL
         self.descriptor = RuntimeDescriptor(
-            id: RuntimeID("test-simulation"),
+            id: RuntimeID.simulation,
             name: "WarpNest Simulated Test Engine",
             version: "1.0-simulated",
             rootPath: "/usr/bin",
             isVerified: true,
             isSimulation: true,
             supportedArchitectures: ["arm64", "x86_64"],
-            supportedGraphicsBackends: [.automatic, .wineD3D, .dxvk]
+            supportedGraphicsBackends: [.automatic, .wineD3D]
         )
     }
 

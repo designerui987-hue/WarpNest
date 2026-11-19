@@ -4,47 +4,115 @@ import Foundation
 public struct GameID: Hashable, Codable, Sendable, CustomStringConvertible {
     public let rawValue: UUID
 
+    private enum CodingKeys: String, CodingKey {
+        case rawValue
+    }
+
     public init(rawValue: UUID = UUID()) {
         self.rawValue = rawValue
     }
 
     public var description: String { rawValue.uuidString }
+
+    public init(from decoder: Decoder) throws {
+        if let single = try? decoder.singleValueContainer(), let uuid = try? single.decode(UUID.self) {
+            self.rawValue = uuid
+        } else {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.rawValue = try container.decode(UUID.self, forKey: .rawValue)
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
 }
 
 /// Unique identifier for a Wine prefix/bottle.
 public struct BottleID: Hashable, Codable, Sendable, CustomStringConvertible {
     public let rawValue: UUID
 
+    private enum CodingKeys: String, CodingKey {
+        case rawValue
+    }
+
     public init(rawValue: UUID = UUID()) {
         self.rawValue = rawValue
     }
 
     public var description: String { rawValue.uuidString }
+
+    public init(from decoder: Decoder) throws {
+        if let single = try? decoder.singleValueContainer(), let uuid = try? single.decode(UUID.self) {
+            self.rawValue = uuid
+        } else {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.rawValue = try container.decode(UUID.self, forKey: .rawValue)
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
 }
 
 /// Unique identifier for a registered compatibility runtime.
 public struct RuntimeID: Hashable, Codable, Sendable, CustomStringConvertible {
     public let rawValue: String
 
+    private enum CodingKeys: String, CodingKey {
+        case rawValue
+    }
+
     public init(_ rawValue: String) {
         self.rawValue = rawValue
     }
 
     public var description: String { rawValue }
+
+    /// Canonical shared identifier for the simulated test engine.
+    public static let simulation = RuntimeID("test-simulation")
+    /// Deprecated legacy identifier retained for seamless persisted migration.
+    public static let legacySimulation = RuntimeID("test-adapter-v1")
+
+    public init(from decoder: Decoder) throws {
+        if let single = try? decoder.singleValueContainer(), let str = try? single.decode(String.self) {
+            self.rawValue = str
+        } else {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.rawValue = try container.decode(String.self, forKey: .rawValue)
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
 }
 
 /// Graphics backend supported by a runtime or requested by a bottle.
 public enum GraphicsBackend: String, Codable, Sendable, CaseIterable {
     case automatic = "Automatic"
-    case dxvk = "DXVK (not installed — sets renderer hint only)"
     case wineD3D = "WineD3D (built-in Wine D3D translation)"
+    case dxvk = "DXVK (not installed — sets renderer hint only)"
+    case d3dMetal = "Apple D3DMetal (unsupported / not distributed)"
 
     public var displayName: String { rawValue }
+
+    /// Whether this backend is verified supported and executable out-of-the-box in this build.
+    public var isSupported: Bool {
+        switch self {
+        case .automatic, .wineD3D: return true
+        case .dxvk, .d3dMetal: return false
+        }
+    }
 
     /// Whether the backend requires manual installation (not bundled by WarpNest).
     public var isInstallRequired: Bool {
         switch self {
-        case .dxvk: return true
+        case .dxvk, .d3dMetal: return true
         case .wineD3D, .automatic: return false
         }
     }
@@ -52,22 +120,26 @@ public enum GraphicsBackend: String, Codable, Sendable, CaseIterable {
     /// Human-readable note describing capability limits and configuration behaviour.
     public var capabilityNote: String {
         switch self {
-        case .dxvk:
-            return "DXVK libraries must be installed manually in the bottle. This option sets WINE_D3D_CONFIG=renderer=vulkan only."
-        case .wineD3D:
-            return "Uses Wine's built-in D3D translation layer. No additional installation required."
         case .automatic:
             return "Uses the runtime's default graphics configuration."
+        case .wineD3D:
+            return "Uses Wine's built-in D3D translation layer. Verified available in standard Wine builds."
+        case .dxvk:
+            return "DXVK libraries must be installed manually in the bottle. This option sets WINE_D3D_CONFIG=renderer=vulkan only."
+        case .d3dMetal:
+            return "Apple D3DMetal is proprietary and not distributed with WarpNest. It cannot be used without external Game Porting Toolkit components."
         }
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
         let raw = try container.decode(String.self)
-        // Backward-compatible migration: map legacy d3dMetal / D3DMetal and prior verbose labels
-        if raw == "d3dMetal" || raw == "D3DMetal" || raw == "DXVK (DirectX 9/10/11 -> Vulkan -> Metal)" {
+        // Backward-compatible decoding: preserve legacy configurations truthfully without silent substitution
+        if raw == "d3dMetal" || raw == "D3DMetal" || raw == "Apple D3DMetal (unsupported / not distributed)" {
+            self = .d3dMetal
+        } else if raw == "dxvk" || raw == "DXVK" || raw == "DXVK (DirectX 9/10/11 -> Vulkan -> Metal)" {
             self = .dxvk
-        } else if raw == "WineD3D (DirectX -> OpenGL/Metal)" {
+        } else if raw == "wineD3D" || raw == "WineD3D" || raw == "WineD3D (DirectX -> OpenGL/Metal)" {
             self = .wineD3D
         } else if let match = GraphicsBackend(rawValue: raw) {
             self = match
@@ -154,6 +226,19 @@ public struct Bottle: Identifiable, Codable, Sendable, Equatable {
         self.createdAt = createdAt
         self.lastUsedAt = lastUsedAt
     }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(BottleID.self, forKey: .id)
+        self.name = try container.decode(String.self, forKey: .name)
+        let rID = try container.decode(RuntimeID.self, forKey: .runtimeID)
+        // Transparent migration of legacy test-adapter-v1 to canonical test-simulation
+        self.runtimeID = (rID == RuntimeID.legacySimulation) ? RuntimeID.simulation : rID
+        self.directoryPath = try container.decode(String.self, forKey: .directoryPath)
+        self.configuration = try container.decode(BottleConfiguration.self, forKey: .configuration)
+        self.createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        self.lastUsedAt = try container.decodeIfPresent(Date.self, forKey: .lastUsedAt)
+    }
 }
 
 /// A runtime entry persisted to disk so imported runtimes survive restarts.
@@ -186,11 +271,12 @@ public struct PersistedRuntime: Codable, Sendable, Identifiable {
 }
 
 /// Status of an application launch or session.
-public enum SessionState: String, Codable, Sendable {
+public enum SessionState: String, Codable, Sendable, CaseIterable {
     case stopped = "Stopped"
     case preparing = "Preparing Prefix"
     case running = "Running"
     case stopping = "Stopping"
+    case stopFailed = "Stop Failed"
     case failed = "Failed"
 }
 

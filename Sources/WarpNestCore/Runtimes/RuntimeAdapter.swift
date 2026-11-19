@@ -37,6 +37,7 @@ public enum RuntimeAdapterError: Error, LocalizedError, Sendable {
     case binaryNotFound(String)
     case runtimeValidationFailed(String)
     case unsupportedArchitecture(String)
+    case unsupportedConfiguration(String)
     case winebootFailed(Int32)
     case winebootTimedOut
     case wineCommandFailed(String)
@@ -50,6 +51,8 @@ public enum RuntimeAdapterError: Error, LocalizedError, Sendable {
             return "Runtime validation failed: \(reason)"
         case .unsupportedArchitecture(let arch):
             return "Architecture '\(arch)' is not supported by this runtime."
+        case .unsupportedConfiguration(let reason):
+            return "Configuration unsupported: \(reason)"
         case .winebootFailed(let code):
             return "wineboot failed with exit code \(code)"
         case .winebootTimedOut:

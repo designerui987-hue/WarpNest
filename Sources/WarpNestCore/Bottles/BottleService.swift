@@ -138,9 +138,15 @@ public actor BottleService {
     }
 
     public func loadBottles() async throws -> [Bottle] {
+        let fileURL = metadataStore.baseDirectory.appendingPathComponent("bottles.json")
+        let rawContent = try? String(contentsOf: fileURL, encoding: .utf8)
         let loaded = try await metadataStore.load([Bottle].self, from: "bottles.json", fallback: [])
         for b in loaded {
             bottles[b.id] = b
+        }
+        // If raw file stored the legacy simulation runtime ID, re-persist with canonical simulation ID
+        if let rawContent = rawContent, rawContent.contains(RuntimeID.legacySimulation.rawValue) {
+            try? await persistBottles()
         }
         return loaded
     }

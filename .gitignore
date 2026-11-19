@@ -12,10 +12,10 @@ project.xcworkspace/xcuserdata/
 *.moved-aside
 
 # App Data & User Test Data
-WarpNestAppData/
-WineRuntimes/
-Runtimes/
-TestBottles/
+/WarpNestAppData/
+/WineRuntimes/
+/Runtimes/
+/TestBottles/
 *.log
 *.zip
 *.tar.xz

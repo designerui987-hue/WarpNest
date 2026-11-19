@@ -59,6 +59,7 @@ public struct WineRuntimeAdapter: RuntimeAdapter {
         self.winebootExecutableURL = winebootURL
         self.wineserverExecutableURL = wineserverURL
 
+        let detectedArchs = Self.detectArchitectures(for: actualWine)
         let assignedID = stableID ?? RuntimeID("wine-" + UUID().uuidString)
         self.descriptor = RuntimeDescriptor(
             id: assignedID,
@@ -67,9 +68,36 @@ public struct WineRuntimeAdapter: RuntimeAdapter {
             rootPath: rootDirectory.path,
             isVerified: false,
             isSimulation: false,
-            supportedArchitectures: ["x86_64", "arm64"],
-            supportedGraphicsBackends: [.automatic, .dxvk, .wineD3D]
+            supportedArchitectures: detectedArchs,
+            supportedGraphicsBackends: [.automatic, .wineD3D]
         )
+    }
+
+    /// Inspects the binary Mach-O header to truthfully determine supported architectures without hardcoding.
+    public static func detectArchitectures(for binaryURL: URL) -> [String] {
+        guard let handle = try? FileHandle(forReadingFrom: binaryURL) else {
+            return ["unknown"]
+        }
+        defer { try? handle.close() }
+        let headerData = handle.readData(ofLength: 4)
+        guard headerData.count == 4 else { return ["unknown"] }
+        let magic = headerData.withUnsafeBytes { $0.load(as: UInt32.self) }
+
+        if magic == 0xfeedfacf || magic == 0xcffaedfe {
+            let cpuData = handle.readData(ofLength: 4)
+            guard cpuData.count == 4 else { return ["unknown"] }
+            let cpuType = cpuData.withUnsafeBytes { $0.load(as: UInt32.self) }
+            if cpuType == 0x0100000c || cpuType == 0x0c000001 {
+                return ["arm64"]
+            } else if cpuType == 0x01000007 || cpuType == 0x07000001 {
+                return ["x86_64"]
+            }
+        } else if magic == 0xcafebabe || magic == 0xbebafeca {
+            return ["x86_64", "arm64"]
+        } else if magic == 0x7f454c46 {
+            return ["x86_64"]
+        }
+        return ["unknown"]
     }
 
     /// Validates the runtime by executing `wine --version` with a bounded timeout and checking executable permissions.
@@ -215,6 +243,8 @@ public struct WineRuntimeAdapter: RuntimeAdapter {
         }
 
         switch configuration.graphicsBackend {
+        case .d3dMetal:
+            throw RuntimeAdapterError.unsupportedConfiguration("Apple D3DMetal is proprietary and not distributed with WarpNest. It cannot be used without external Game Porting Toolkit components.")
         case .dxvk:
             // NOTE: sets renderer hint only; does not install or verify DXVK
             env["WINE_D3D_CONFIG"] = "renderer=vulkan"
@@ -237,11 +267,14 @@ public struct WineRuntimeAdapter: RuntimeAdapter {
     public func stopPrefix(at prefixURL: URL) async throws {
         guard FileManager.default.fileExists(atPath: wineserverExecutableURL.path) else { return }
         let supervisor = ProcessSupervisor()
-        _ = try? await supervisor.launch(
+        let status = try await supervisor.launch(
             executableURL: wineserverExecutableURL,
             arguments: ["-k"],
             environment: ["WINEPREFIX": prefixURL.path]
         )
+        guard status.exitCode == 0 else {
+            throw RuntimeAdapterError.wineCommandFailed("wineserver -k failed with exit code \(status.exitCode)")
+        }
     }
 
     public func isPrefixRunning(at prefixURL: URL) async -> Bool {
