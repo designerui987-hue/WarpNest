@@ -49,6 +49,63 @@ struct LibraryView: View {
             }
             .padding()
             Divider()
+            if let handoff = viewModel.pendingInstallerHandoff {
+                HStack(spacing: 12) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                        .font(.title2)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Steam Installation Detected").bold()
+                        Text("Found Steam.exe at: \(handoff.detectedExecutablePath)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                    Button("Keep Installer") {
+                        viewModel.cancelInstallerHandoff()
+                    }
+                    .buttonStyle(.borderless)
+                    Button("Confirm Steam") {
+                        Task {
+                            try? await viewModel.confirmInstallerHandoff(for: handoff.id, targetPath: handoff.detectedExecutablePath)
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .padding(12)
+                .background(Color.green.opacity(0.12))
+                .cornerRadius(10)
+                .padding(.horizontal)
+            } else if let failedID = viewModel.failedInstallerGameID, let failedGame = viewModel.games.first(where: { $0.id == failedID }) {
+                HStack(spacing: 12) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                        .font(.title2)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Setup Ended: Steam.exe Not Found").bold()
+                        Text("The environment and files were preserved.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                    Button("Retry Setup") {
+                        Task { await viewModel.retryInstaller(for: failedID) }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    Button("Choose Installed App…") {
+                        chooseAppForFailedGame(failedGame)
+                    }
+                    .buttonStyle(.bordered)
+                    Button("Dismiss") {
+                        viewModel.failedInstallerGameID = nil
+                    }
+                    .buttonStyle(.borderless)
+                }
+                .padding(12)
+                .background(Color.orange.opacity(0.12))
+                .cornerRadius(10)
+                .padding(.horizontal)
+            }
             if viewModel.games.isEmpty {
                 ContentUnavailableView {
                     Label("Your game and app library", systemImage: "gamecontroller")
@@ -90,6 +147,19 @@ struct LibraryView: View {
         if !hasRuntime { viewModel.selectedTab = .settings }
         else if availableBottles.isEmpty { viewModel.selectedTab = .bottles }
         else { showingAddSheet = true }
+    }
+
+    private func chooseAppForFailedGame(_ game: GameItem) {
+        guard let bottle = availableBottles.first(where: { $0.id == game.bottleID }) else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [UTType(filenameExtension: "exe") ?? .data]
+        panel.directoryURL = URL(fileURLWithPath: bottle.directoryPath).appendingPathComponent("drive_c")
+        panel.message = "Choose the installed Windows executable for \(game.name)"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task {
+            try? await viewModel.chooseInstalledAppManually(for: game.id, chosenURL: url)
+        }
     }
 }
 
@@ -219,6 +289,15 @@ struct GameCardView: View {
                         .fill(circleColor(for: state))
                         .frame(width: 8, height: 8)
                     if simulated { Text("Simulated").font(.caption) }
+                    if game.isInstaller {
+                        Text("Installer")
+                            .font(.caption2)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Color.blue.opacity(0.2))
+                            .foregroundColor(.blue)
+                            .cornerRadius(4)
+                    }
                     Text(state.rawValue)
                         .font(.caption)
                         .foregroundColor(.secondary)
@@ -229,7 +308,7 @@ struct GameCardView: View {
                 let state = viewModel.activeSessionStates[game.id] ?? .stopped
                 let isRunning = state == .running || state == .stopFailed
                 let isTransitioning = state == .preparing || state == .stopping
-                let buttonTitle = state == .stopFailed ? "Retry Stop" : (isRunning ? "Stop" : "Play")
+                let buttonTitle = state == .stopFailed ? "Retry Stop" : (isRunning ? "Stop" : (game.isInstaller ? "Run Setup" : "Play"))
                 let buttonIcon = isRunning ? "stop.fill" : "play.fill"
 
                 Button {
@@ -296,7 +375,7 @@ struct GameListRowView: View {
 
             let isRunning = state == .running || state == .stopFailed
             let isTransitioning = state == .preparing || state == .stopping
-            let buttonTitle = state == .stopFailed ? "Retry Stop" : (isRunning ? "Stop" : "Play")
+            let buttonTitle = state == .stopFailed ? "Retry Stop" : (isRunning ? "Stop" : (game.isInstaller ? "Run Setup" : "Play"))
 
             Button(buttonTitle) {
                 Task {

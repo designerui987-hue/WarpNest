@@ -290,6 +290,7 @@ public struct GameItem: Identifiable, Codable, Sendable, Equatable {
     public var arguments: [String]
     public var environmentOverrides: [String: String]
     public var isExternalExecutable: Bool
+    public var isInstaller: Bool
     public var iconPath: String?
     public var notes: String
     public var createdAt: Date
@@ -305,6 +306,7 @@ public struct GameItem: Identifiable, Codable, Sendable, Equatable {
         arguments: [String] = [],
         environmentOverrides: [String: String] = [:],
         isExternalExecutable: Bool = false,
+        isInstaller: Bool = false,
         iconPath: String? = nil,
         notes: String = "",
         createdAt: Date = Date(),
@@ -319,6 +321,7 @@ public struct GameItem: Identifiable, Codable, Sendable, Equatable {
         self.arguments = arguments
         self.environmentOverrides = environmentOverrides
         self.isExternalExecutable = isExternalExecutable
+        self.isInstaller = isInstaller
         self.iconPath = iconPath
         self.notes = notes
         self.createdAt = createdAt
@@ -336,6 +339,7 @@ public struct GameItem: Identifiable, Codable, Sendable, Equatable {
         self.arguments = try container.decodeIfPresent([String].self, forKey: .arguments) ?? []
         self.environmentOverrides = try container.decodeIfPresent([String: String].self, forKey: .environmentOverrides) ?? [:]
         self.isExternalExecutable = try container.decodeIfPresent(Bool.self, forKey: .isExternalExecutable) ?? false
+        self.isInstaller = try container.decodeIfPresent(Bool.self, forKey: .isInstaller) ?? false
         self.iconPath = try container.decodeIfPresent(String.self, forKey: .iconPath)
         self.notes = try container.decodeIfPresent(String.self, forKey: .notes) ?? ""
         self.createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()

@@ -156,6 +156,51 @@ public actor BottleService {
         try await metadataStore.save(list, to: "bottles.json")
     }
 
+    /// Searches a bottle's Windows drive_c hierarchy for a named executable (e.g. "Steam.exe").
+    /// Returns the relative path inside the bottle prefix (e.g. "drive_c/Program Files (x86)/Steam/steam.exe").
+    public func locateInstalledExecutable(named name: String, in bottleID: BottleID) -> String? {
+        guard let bottle = bottles[bottleID] else { return nil }
+        let bottleURL = URL(fileURLWithPath: bottle.directoryPath)
+        let driveC = bottleURL.appendingPathComponent("drive_c", isDirectory: true)
+
+        let targetLower = name.lowercased()
+
+        // 1. Standard known locations first for instant resolution
+        let wellKnownCandidates = [
+            "drive_c/Program Files (x86)/Steam/Steam.exe",
+            "drive_c/Program Files (x86)/Steam/steam.exe",
+            "drive_c/Program Files/Steam/Steam.exe",
+            "drive_c/Program Files/Steam/steam.exe"
+        ]
+        for rel in wellKnownCandidates {
+            let fullURL = bottleURL.appendingPathComponent(rel)
+            if FileManager.default.fileExists(atPath: fullURL.path) {
+                return rel
+            }
+        }
+
+        // 2. Recursive search within drive_c
+        guard FileManager.default.fileExists(atPath: driveC.path) else { return nil }
+        let resolvedBottle = bottleURL.resolvingSymlinksInPath().path
+        let bottlePrefix = resolvedBottle.hasSuffix("/") ? resolvedBottle : resolvedBottle + "/"
+
+        if let enumerator = FileManager.default.enumerator(
+            at: driveC,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            for case let fileURL as URL in enumerator {
+                if fileURL.lastPathComponent.lowercased() == targetLower {
+                    let resolvedFile = fileURL.resolvingSymlinksInPath().path
+                    if resolvedFile.hasPrefix(bottlePrefix) {
+                        return String(resolvedFile.dropFirst(bottlePrefix.count))
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
     /// Creates a new bottle prefix and runs initialization via the assigned runtime adapter.
     public func createBottle(
         name: String,

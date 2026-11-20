@@ -1,11 +1,11 @@
 # WarpNest Development Progress
 
 ## Status Overview
-- **Active Phase:** Batch 1 Complete (Truthful Runtime, Lifecycle & Shutdown Correctness) → Ready for Phase 2 (Steam Workflow)
-- **Current Milestone:** Batch 1 Verified & Hardened (44 tests passing across 7 suites)
+- **Active Phase:** Phase 2 (Steam Workflow & Installer Handoff Complete)
+- **Current Milestone:** Steam Handoff Verified (48 tests passing across 8 suites)
 - **Repository Branch:** `main`
 - **Host Target:** macOS 14+ / Apple Silicon (`arm64`), Swift 6 toolchain
-- **Automated Test Matrix:** 44 tests across 7 suites passing (`swift test`, 38.0s)
+- **Automated Test Matrix:** 48 tests across 8 suites passing (`swift test`, 17.8s)
 
 ---
 
@@ -92,9 +92,42 @@
 
 ---
 
-## Next Milestone
-- **Phase 2: Complete Steam Workflow**
-  - Dedicated Steam bottle creation with optimal defaults (32/64-bit prefix, core fonts, msinstall).
-  - Official installer download with SHA-256 integrity validation (`https://cdn.fastly.steamstatic.com/client/installer/SteamSetup.exe`).
-  - Headless/silent installation handling and self-update progress tracking across process restarts.
-  - Steam client shortcut registration and visual CEF login window verification.
+### Phase 2: Steam Workflow & Installer Handoff (20 Nov 2026)
+- [x] **Installer-to-Installed-App Handoff for Steam:**
+  - Added `locateInstalledExecutable(named:in:)` to `BottleService` to locate `Steam.exe` inside bottle prefix hierarchies (`drive_c/Program Files (x86)/Steam/Steam.exe`, `drive_c/Program Files/Steam/Steam.exe`).
+  - Added `updateGameTarget` to `LibraryService` to safely mutate and persist the target executable path and name.
+  - Implemented automatic detection and confirmation banner in `LibraryView` and `AppViewModel` (`pendingInstallerHandoff`).
+  - Preserved standalone executable behavior: standard game shortcuts without installer semantics run normally without handoff prompts.
+  - Handled installer failure/cancellation: environment and files are strictly preserved with options to **Retry Setup** or **Choose Installed App…**.
+  - Added regression test suite `SteamInstallerHandoffTests` covering success handoff, cancellation/failure environment preservation, cold-start restart relaunch, and standalone path invariance.
+
+---
+
+## Verified Test Matrix Summary (Commit Baseline)
+- **Total Tests Executed:** 48
+- **Passing:** 48
+- **Failing:** 0
+- **Skipped / Untested:** 0
+- **Suites:**
+  - `Steam Installer Handoff Tests` (4/4 passing)
+  - `WarpNestCore Metadata & Storage Tests` (6/6 passing)
+  - `Bottle & Library Integration Tests` (4/4 passing)
+  - `Archive Security & Integrity Tests` (7/7 passing)
+  - `Batch 1 Regression Tests` (11/11 passing)
+  - `Manual Verification Checklist Tests` (4/4 passing)
+  - `ProcessSupervisor Tests` (6/6 passing)
+  - `Real Wine Runtime Demonstration Tests` (6/6 passing — real prefix creation, WineMine launch, lifecycle)
+
+---
+
+## Manual Verification Checklist for Real-Mac Steam Sign-In
+The following steps cannot be validated by headless automated tests and require a physical Mac with GPU display and user credentials:
+1. **Interactive Visual Login Window Verification:**
+   - Launching the confirmed `Steam.exe` executable inside Wine.
+   - Verifying the CEF (Chromium Embedded Framework) desktop login window displays visually without black screens or crashes on Apple Silicon.
+2. **User Authentication & Guard:**
+   - Entering real Steam account credentials, 2-Factor Steam Guard code, or QR code scan via mobile app.
+3. **Steam Store & Download Test:**
+   - Accessing Steam Store/Library, downloading a small free Windows game (e.g., *Peggle*, *Spelunky Classic*, or free demo), and verifying download progress.
+4. **Direct Game Launch through Steam:**
+   - Clicking Play on an installed Steam game and confirming game execution within the managed bottle.

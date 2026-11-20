@@ -150,7 +150,8 @@ public actor LibraryService {
         workingDirectoryRelativePath: String? = nil,
         arguments: [String] = [],
         environmentOverrides: [String: String] = [:],
-        isExternalExecutable: Bool = false
+        isExternalExecutable: Bool = false,
+        isInstaller: Bool? = nil
     ) async throws -> GameItem {
         guard let bottle = await bottleService.getBottle(id: bottleID) else {
             throw LibraryServiceError.bottleNotFound(bottleID)
@@ -168,6 +169,20 @@ public actor LibraryService {
             _ = try resolveAndValidateExecutable(relativePath: executableRelativePath, bottleURL: bottleURL)
         }
 
+        let defaultIsInstaller: Bool
+        if let explicit = isInstaller {
+            defaultIsInstaller = explicit
+        } else {
+            let lowerName = name.lowercased()
+            let lowerExe = executableRelativePath.lowercased()
+            defaultIsInstaller = isExternalExecutable && (
+                lowerName.contains("installer") ||
+                lowerName.contains("setup") ||
+                lowerExe.contains("setup.exe") ||
+                lowerExe.contains("steamsetup")
+            )
+        }
+
         let newGame = GameItem(
             name: name.trimmingCharacters(in: .whitespacesAndNewlines),
             bottleID: bottleID,
@@ -175,12 +190,59 @@ public actor LibraryService {
             workingDirectoryRelativePath: workingDirectoryRelativePath,
             arguments: arguments,
             environmentOverrides: environmentOverrides,
-            isExternalExecutable: isExternalExecutable
+            isExternalExecutable: isExternalExecutable,
+            isInstaller: defaultIsInstaller
         )
 
         games[newGame.id] = newGame
         try await persistGames()
         return newGame
+    }
+
+    /// Locates an installed executable (such as Steam.exe) inside the bottle containing the specified game/installer.
+    public func locateInstalledExecutable(named name: String = "Steam.exe", for gameID: GameID) async -> String? {
+        guard let game = games[gameID] else { return nil }
+        return await bottleService.locateInstalledExecutable(named: name, in: game.bottleID)
+    }
+
+    /// Updates a game item's executable target, e.g. when handing off from an installer to an installed application.
+    @discardableResult
+    public func updateGameTarget(
+        id: GameID,
+        newExecutableRelativePath: String,
+        isExternal: Bool = false,
+        newName: String? = nil,
+        isInstaller: Bool = false
+    ) async throws -> GameItem {
+        guard var game = games[id] else {
+            throw LibraryServiceError.gameNotFound(id)
+        }
+        guard let bottle = await bottleService.getBottle(id: game.bottleID) else {
+            throw LibraryServiceError.bottleNotFound(game.bottleID)
+        }
+
+        let bottleURL = URL(fileURLWithPath: bottle.directoryPath)
+        if !isExternal {
+            // Validate that the target exists inside the bottle
+            _ = try resolveAndValidateExecutable(relativePath: newExecutableRelativePath, bottleURL: bottleURL)
+        } else {
+            let externalURL = URL(fileURLWithPath: newExecutableRelativePath).resolvingSymlinksInPath()
+            guard FileManager.default.fileExists(atPath: externalURL.path) else {
+                throw LibraryServiceError.executableNotFound(externalURL.path)
+            }
+        }
+
+        game.executableRelativePath = newExecutableRelativePath
+        game.isExternalExecutable = isExternal
+        game.isInstaller = isInstaller
+        if let newName = newName, !newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            game.name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        game.workingDirectoryRelativePath = nil
+
+        games[id] = game
+        try await persistGames()
+        return game
     }
 
     /// Removes a game shortcut from the library without deleting the underlying bottle or files.

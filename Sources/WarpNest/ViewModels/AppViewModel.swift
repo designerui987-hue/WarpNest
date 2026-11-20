@@ -17,6 +17,24 @@ public final class AppViewModel {
     public var appSettings: AppSettings = AppSettings()
     public var errorMessage: String?
     public var showingErrorAlert: Bool = false
+    public var pendingInstallerHandoff: InstallerHandoff? = nil
+    public var failedInstallerGameID: GameID? = nil
+
+    public struct InstallerHandoff: Identifiable, Sendable, Equatable {
+        public let id: GameID
+        public let gameName: String
+        public let bottleID: BottleID
+        public let detectedExecutablePath: String
+        public let detectedExecutableName: String
+
+        public init(id: GameID, gameName: String, bottleID: BottleID, detectedExecutablePath: String, detectedExecutableName: String = "Steam.exe") {
+            self.id = id
+            self.gameName = gameName
+            self.bottleID = bottleID
+            self.detectedExecutablePath = detectedExecutablePath
+            self.detectedExecutableName = detectedExecutableName
+        }
+    }
 
     public let metadataStore: MetadataStore
     public let bottleService: BottleService
@@ -208,6 +226,11 @@ public final class AppViewModel {
                 await libraryService.setStateListener(for: game.id) { [weak self] newState in
                     Task { @MainActor [weak self] in
                         self?.activeSessionStates[game.id] = newState
+                        if newState == .stopped || newState == .failed {
+                            if let g = self?.games.first(where: { $0.id == game.id }), g.isInstaller {
+                                await self?.checkInstallerHandoff(for: game.id)
+                            }
+                        }
                     }
                 }
             }
@@ -237,14 +260,16 @@ public final class AppViewModel {
         name: String,
         bottleID: BottleID,
         executablePath: String,
-        isExternalExecutable: Bool = false
+        isExternalExecutable: Bool = false,
+        isInstaller: Bool? = nil
     ) async throws {
         do {
             _ = try await libraryService.addGame(
                 name: name,
                 bottleID: bottleID,
                 executableRelativePath: executablePath,
-                isExternalExecutable: isExternalExecutable
+                isExternalExecutable: isExternalExecutable,
+                isInstaller: isInstaller
             )
             await reloadData()
         } catch {
@@ -260,6 +285,9 @@ public final class AppViewModel {
             activeSessionStates[game.id] = .stopping
             await libraryService.stopGame(id: game.id)
             activeSessionStates[game.id] = await libraryService.getSessionState(for: game.id)
+            if game.isInstaller {
+                await checkInstallerHandoff(for: game.id)
+            }
         } else {
             activeSessionStates[game.id] = .preparing
             do {
@@ -268,8 +296,77 @@ public final class AppViewModel {
             } catch {
                 activeSessionStates[game.id] = .failed
                 showError("Launch error: \(error.localizedDescription)")
+                if game.isInstaller {
+                    await checkInstallerHandoff(for: game.id)
+                }
             }
         }
+    }
+
+    public func checkInstallerHandoff(for gameID: GameID) async {
+        guard let game = games.first(where: { $0.id == gameID }), game.isInstaller else { return }
+        if let detected = await libraryService.locateInstalledExecutable(named: "Steam.exe", for: gameID) {
+            self.pendingInstallerHandoff = InstallerHandoff(
+                id: gameID,
+                gameName: game.name,
+                bottleID: game.bottleID,
+                detectedExecutablePath: detected,
+                detectedExecutableName: "Steam.exe"
+            )
+            self.failedInstallerGameID = nil
+        } else {
+            // Setup finished or failed and client was not found: preserve environment and offer retry or manual selection
+            self.failedInstallerGameID = gameID
+            self.pendingInstallerHandoff = nil
+        }
+    }
+
+    public func confirmInstallerHandoff(for gameID: GameID, targetPath: String, newName: String = "Steam") async throws {
+        do {
+            _ = try await libraryService.updateGameTarget(
+                id: gameID,
+                newExecutableRelativePath: targetPath,
+                isExternal: false,
+                newName: newName,
+                isInstaller: false
+            )
+            self.pendingInstallerHandoff = nil
+            self.failedInstallerGameID = nil
+            await reloadData()
+        } catch {
+            showError("Failed to set launch target: \(error.localizedDescription)")
+            throw error
+        }
+    }
+
+    public func cancelInstallerHandoff() {
+        self.pendingInstallerHandoff = nil
+    }
+
+    public func retryInstaller(for gameID: GameID) async {
+        self.failedInstallerGameID = nil
+        if let game = games.first(where: { $0.id == gameID }) {
+            await toggleGameSession(game: game)
+        }
+    }
+
+    public func chooseInstalledAppManually(for gameID: GameID, chosenURL: URL) async throws {
+        guard let game = games.first(where: { $0.id == gameID }),
+              let bottle = bottles.first(where: { $0.id == game.bottleID }) else {
+            throw BottleServiceError.bottleNotFound(BottleID())
+        }
+        let bottleURL = URL(fileURLWithPath: bottle.directoryPath).resolvingSymlinksInPath()
+        let chosenResolved = chosenURL.resolvingSymlinksInPath()
+        let prefixPath = bottleURL.path.hasSuffix("/") ? bottleURL.path : bottleURL.path + "/"
+
+        guard chosenResolved.path.hasPrefix(prefixPath) else {
+            showError("Selected file must be inside the bottle's drive_c directory.")
+            return
+        }
+
+        let relPath = String(chosenResolved.path.dropFirst(prefixPath.count))
+        let appName = chosenURL.deletingPathExtension().lastPathComponent
+        try await confirmInstallerHandoff(for: gameID, targetPath: relPath, newName: appName.isEmpty ? "Steam" : appName)
     }
 
     public func refreshDiagnostics() async {
