@@ -355,7 +355,35 @@ struct GameCardView: View {
                 Button {
                     Task { await viewModel.discoverSteamGames(in: game.bottleID) }
                 } label: {
-                    Label("Scan for Installed Steam Games", systemImage: "arrow.clockwise")
+                    Label("Scan for Installed Steam Games", systemImage: "sparkles")
+                }
+
+                Divider()
+
+                Menu("Steam Display / Mode") {
+                    Button("Safe Graphics (Fix CEF Black Screen)") {
+                        Task {
+                            await viewModel.setGameArguments(
+                                for: game.id,
+                                arguments: ["-cef-disable-gpu", "-cef-disable-gpu-compositing", "-no-cef-sandbox"]
+                            )
+                        }
+                    }
+
+                    Button("Small Mode (No Browser / Minimal List)") {
+                        Task {
+                            await viewModel.setGameArguments(
+                                for: game.id,
+                                arguments: ["-no-browser", "+open", "steam://open/minigameslist"]
+                            )
+                        }
+                    }
+
+                    Button("Standard Mode") {
+                        Task {
+                            await viewModel.setGameArguments(for: game.id, arguments: [])
+                        }
+                    }
                 }
             }
         }
@@ -420,7 +448,35 @@ struct GameListRowView: View {
                 Button {
                     Task { await viewModel.discoverSteamGames(in: game.bottleID) }
                 } label: {
-                    Label("Scan for Installed Steam Games", systemImage: "arrow.clockwise")
+                    Label("Scan for Installed Steam Games", systemImage: "sparkles")
+                }
+
+                Divider()
+
+                Menu("Steam Display / Mode") {
+                    Button("Safe Graphics (Fix CEF Black Screen)") {
+                        Task {
+                            await viewModel.setGameArguments(
+                                for: game.id,
+                                arguments: ["-cef-disable-gpu", "-cef-disable-gpu-compositing", "-no-cef-sandbox"]
+                            )
+                        }
+                    }
+
+                    Button("Small Mode (No Browser / Minimal List)") {
+                        Task {
+                            await viewModel.setGameArguments(
+                                for: game.id,
+                                arguments: ["-no-browser", "+open", "steam://open/minigameslist"]
+                            )
+                        }
+                    }
+
+                    Button("Standard Mode") {
+                        Task {
+                            await viewModel.setGameArguments(for: game.id, arguments: [])
+                        }
+                    }
                 }
             }
         }

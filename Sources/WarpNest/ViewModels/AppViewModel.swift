@@ -409,6 +409,15 @@ public final class AppViewModel {
         }
     }
 
+    public func setGameArguments(for gameID: GameID, arguments: [String]) async {
+        do {
+            try await libraryService.updateGameArguments(id: gameID, arguments: arguments)
+            await reloadData()
+        } catch {
+            showError("Failed to update launch options: \(error.localizedDescription)")
+        }
+    }
+
     public func showError(_ message: String) {
         self.errorMessage = message
         self.showingErrorAlert = true

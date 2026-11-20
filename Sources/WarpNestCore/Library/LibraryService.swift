@@ -212,7 +212,8 @@ public actor LibraryService {
         newExecutableRelativePath: String,
         isExternal: Bool = false,
         newName: String? = nil,
-        isInstaller: Bool = false
+        isInstaller: Bool = false,
+        newArguments: [String]? = nil
     ) async throws -> GameItem {
         guard var game = games[id] else {
             throw LibraryServiceError.gameNotFound(id)
@@ -240,9 +241,30 @@ public actor LibraryService {
         }
         game.workingDirectoryRelativePath = nil
 
+        if let args = newArguments {
+            game.arguments = args
+        } else if !isInstaller {
+            // When converting installer to app, strip installer flags (/S)
+            // If Steam, apply default Wine CEF hardware-acceleration bypass flags
+            if newExecutableRelativePath.localizedCaseInsensitiveContains("steam.exe") {
+                game.arguments = ["-cef-disable-gpu", "-cef-disable-gpu-compositing", "-no-cef-sandbox"]
+            } else {
+                game.arguments = []
+            }
+        }
+
         games[id] = game
         try await persistGames()
         return game
+    }
+
+    public func updateGameArguments(id: GameID, arguments: [String]) async throws {
+        guard var game = games[id] else {
+            throw LibraryServiceError.gameNotFound(id)
+        }
+        game.arguments = arguments
+        games[id] = game
+        try await persistGames()
     }
 
     /// Removes a game shortcut from the library without deleting the underlying bottle or files.
