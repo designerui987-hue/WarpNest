@@ -19,6 +19,16 @@ public final class AppViewModel {
     public var showingErrorAlert: Bool = false
     public var pendingInstallerHandoff: InstallerHandoff? = nil
     public var failedInstallerGameID: GameID? = nil
+    public var isInstallingSteam: Bool = false
+    public var steamInstallProgress: Double = 0.0
+    public var steamInstallBytesReceived: Int64 = 0
+    public var steamInstallTotalBytes: Int64 = 0
+    public var steamInstallStatus: String = ""
+    public var steamInstallError: String? = nil
+    public var showingSteamInstallSheet: Bool = false
+    public var discoveredSteamGames: [DiscoveredSteamGame] = []
+    public var showingSteamDiscoverySheet: Bool = false
+    private var steamInstallTask: Task<Void, Never>? = nil
 
     public struct InstallerHandoff: Identifiable, Sendable, Equatable {
         public let id: GameID
@@ -40,6 +50,8 @@ public final class AppViewModel {
     public let bottleService: BottleService
     public let libraryService: LibraryService
     public let diagnosticsService = DiagnosticsService()
+    public let steamDownloader = SteamDownloaderService()
+    public let steamDiscovery = SteamAppDiscoveryService()
 
     public init(baseDirectory: URL = MetadataStore.defaultAppSupportDirectory) {
         let store = MetadataStore(baseDirectory: baseDirectory)
@@ -400,6 +412,153 @@ public final class AppViewModel {
     public func showError(_ message: String) {
         self.errorMessage = message
         self.showingErrorAlert = true
+    }
+
+    // MARK: - Steam Workflow (Phase 2)
+
+    public func openSteamInstaller() {
+        self.steamInstallError = nil
+        self.steamInstallProgress = 0.0
+        self.steamInstallStatus = "Ready to download and install Steam"
+        self.showingSteamInstallSheet = true
+    }
+
+    public func startSteamInstall(targetBottleID: BottleID? = nil) {
+        steamInstallTask?.cancel()
+        steamInstallTask = Task { [weak self] in
+            guard let self else { return }
+            self.isInstallingSteam = true
+            self.steamInstallProgress = 0.0
+            self.steamInstallError = nil
+            self.steamInstallStatus = "Preparing installation..."
+
+            do {
+                // 1. Resolve or create target bottle
+                let bottle: Bottle
+                if let targetID = targetBottleID, let found = bottles.first(where: { $0.id == targetID }) {
+                    bottle = found
+                } else if let existingSteamBottle = bottles.first(where: { $0.name.localizedCaseInsensitiveCompare("Steam") == .orderedSame }) {
+                    bottle = existingSteamBottle
+                } else {
+                    self.steamInstallStatus = "Creating dedicated Steam bottle..."
+                    let validRuntimes = registeredRuntimes.filter {
+                        $0.isVerified && (!$0.isSimulation || appSettings.developerModeEnabled)
+                    }
+                    guard let runtime = validRuntimes.first else {
+                        throw BottleServiceError.runtimeNotFound(RuntimeID("default"))
+                    }
+                    let config = BottleConfiguration(
+                        win64: true,
+                        windowsVersion: "win10",
+                        graphicsBackend: .automatic,
+                        syncBackend: .esync
+                    )
+                    bottle = try await bottleService.createBottle(
+                        name: "Steam",
+                        runtimeID: runtime.id,
+                        configuration: config
+                    )
+                    await reloadData()
+                }
+
+                // 2. Download official verified SteamSetup.exe
+                self.steamInstallStatus = "Downloading official Steam installer..."
+                let baseDir = await metadataStore.baseDirectory
+                let downloadsDir = baseDir.appendingPathComponent("Downloads", isDirectory: true)
+                let destinationURL = downloadsDir.appendingPathComponent("SteamSetup.exe")
+
+                let installerURL = try await steamDownloader.downloadSteamInstaller(
+                    to: destinationURL,
+                    onProgress: { [weak self] received, total, fraction in
+                        Task { @MainActor [weak self] in
+                            guard let self else { return }
+                            self.steamInstallBytesReceived = received
+                            self.steamInstallTotalBytes = total
+                            self.steamInstallProgress = fraction
+                            if total > 0 {
+                                let mbReceived = Double(received) / (1024 * 1024)
+                                let mbTotal = Double(total) / (1024 * 1024)
+                                self.steamInstallStatus = String(format: "Downloading Steam installer (%.1f MB / %.1f MB)...", mbReceived, mbTotal)
+                            } else {
+                                self.steamInstallStatus = "Downloading Steam installer..."
+                            }
+                        }
+                    }
+                )
+
+                try Task.checkCancellation()
+
+                // 3. Register installer shortcut in library if not already present
+                self.steamInstallStatus = "Configuring Steam installer in bottle..."
+                let installerGame: GameItem
+                if let existing = games.first(where: { $0.bottleID == bottle.id && $0.isInstaller && $0.name == "Steam Setup" }) {
+                    installerGame = existing
+                } else {
+                    installerGame = try await libraryService.addGame(
+                        name: "Steam Setup",
+                        bottleID: bottle.id,
+                        executableRelativePath: installerURL.path,
+                        arguments: ["/S"],
+                        isExternalExecutable: true,
+                        isInstaller: true
+                    )
+                    await reloadData()
+                }
+
+                // 4. Launch silent installer inside the prefix
+                self.steamInstallStatus = "Running Steam setup..."
+                self.showingSteamInstallSheet = false
+                self.isInstallingSteam = false
+
+                try await libraryService.launchGame(id: installerGame.id)
+                await reloadData()
+
+            } catch is CancellationError {
+                self.isInstallingSteam = false
+                self.steamInstallStatus = "Installation cancelled."
+            } catch {
+                self.isInstallingSteam = false
+                self.steamInstallError = error.localizedDescription
+                self.steamInstallStatus = "Installation failed."
+            }
+        }
+    }
+
+    public func cancelSteamInstall() {
+        steamInstallTask?.cancel()
+        steamInstallTask = nil
+        isInstallingSteam = false
+        steamInstallStatus = "Installation cancelled."
+        showingSteamInstallSheet = false
+    }
+
+    public func discoverSteamGames(in bottleID: BottleID) async {
+        guard let bottle = bottles.first(where: { $0.id == bottleID }) else { return }
+        let discovered = steamDiscovery.discoverGames(in: bottle)
+        self.discoveredSteamGames = discovered
+        self.showingSteamDiscoverySheet = true
+    }
+
+    public func addDiscoveredGame(_ discovered: DiscoveredSteamGame) async {
+        guard let relPath = discovered.relativeExecutablePath else {
+            showError("Executable for '\(discovered.name)' could not be located.")
+            return
+        }
+        do {
+            _ = try await libraryService.addGame(
+                name: discovered.name,
+                bottleID: discovered.bottleID,
+                executableRelativePath: relPath,
+                isInstaller: false
+            )
+            await reloadData()
+            self.discoveredSteamGames.removeAll(where: { $0.id == discovered.id })
+            if self.discoveredSteamGames.isEmpty {
+                self.showingSteamDiscoverySheet = false
+            }
+        } catch {
+            showError("Failed to add '\(discovered.name)': \(error.localizedDescription)")
+        }
     }
 }
 

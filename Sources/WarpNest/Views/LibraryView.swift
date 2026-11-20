@@ -43,6 +43,11 @@ struct LibraryView: View {
                 .pickerStyle(.segmented)
                 .frame(width: 80)
                 if !viewModel.games.isEmpty {
+                    Button(action: { viewModel.openSteamInstaller() }) {
+                        Label("Install Steam", systemImage: "arrow.down.circle")
+                    }
+                    .buttonStyle(.bordered)
+
                     Button(action: openSetupOrAdd) { Label("Add game or app", systemImage: "plus") }
                         .buttonStyle(.borderedProminent)
                 }
@@ -114,9 +119,16 @@ struct LibraryView: View {
                          : availableBottles.isEmpty ? "Create an environment (bottle) to hold your Windows files and settings."
                          : "Choose a Windows game, app, or installer to add its shortcut.")
                 } actions: {
-                    Button(!hasRuntime ? "Set up Wine" : availableBottles.isEmpty ? "Set up an environment" : "Add game or app",
-                           action: openSetupOrAdd)
-                        .buttonStyle(.borderedProminent)
+                    HStack(spacing: 12) {
+                        Button(action: { viewModel.openSteamInstaller() }) {
+                            Label("Install Steam", systemImage: "arrow.down.circle")
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button(!hasRuntime ? "Set up Wine" : availableBottles.isEmpty ? "Set up an environment" : "Add game or app",
+                               action: openSetupOrAdd)
+                            .buttonStyle(.borderedProminent)
+                    }
                 }
             } else if matches.isEmpty {
                 ContentUnavailableView {
@@ -140,6 +152,12 @@ struct LibraryView: View {
         .navigationTitle("Library")
         .sheet(isPresented: $showingAddSheet) {
             AddShortcutSheet(viewModel: viewModel, bottles: availableBottles)
+        }
+        .sheet(isPresented: $viewModel.showingSteamInstallSheet) {
+            SteamInstallSheet(viewModel: viewModel, bottles: availableBottles)
+        }
+        .sheet(isPresented: $viewModel.showingSteamDiscoverySheet) {
+            SteamDiscoverySheet(viewModel: viewModel)
         }
     }
 
@@ -332,6 +350,15 @@ struct GameCardView: View {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
         )
+        .contextMenu {
+            if game.name.localizedCaseInsensitiveContains("steam") || game.executableRelativePath.localizedCaseInsensitiveContains("steam") {
+                Button {
+                    Task { await viewModel.discoverSteamGames(in: game.bottleID) }
+                } label: {
+                    Label("Scan for Installed Steam Games", systemImage: "arrow.clockwise")
+                }
+            }
+        }
     }
 
     private func circleColor(for state: SessionState) -> Color {
@@ -388,5 +415,203 @@ struct GameListRowView: View {
             .accessibilityLabel("\(buttonTitle) \(game.name)")
         }
         .padding(.vertical, 4)
+        .contextMenu {
+            if game.name.localizedCaseInsensitiveContains("steam") || game.executableRelativePath.localizedCaseInsensitiveContains("steam") {
+                Button {
+                    Task { await viewModel.discoverSteamGames(in: game.bottleID) }
+                } label: {
+                    Label("Scan for Installed Steam Games", systemImage: "arrow.clockwise")
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Steam Sheets (Phase 2)
+
+struct SteamInstallSheet: View {
+    @Bindable var viewModel: AppViewModel
+    let bottles: [Bottle]
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var selectedBottleID: BottleID?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            HStack(spacing: 12) {
+                Image(systemName: "arrow.down.circle.fill")
+                    .foregroundColor(.accentColor)
+                    .font(.system(size: 32))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Install Steam")
+                        .font(.title2)
+                        .bold()
+                    Text("Downloads and sets up official Steam client with verified cryptographic integrity.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Divider()
+
+            if viewModel.isInstallingSteam {
+                VStack(alignment: .leading, spacing: 10) {
+                    ProgressView(value: viewModel.steamInstallProgress, total: 1.0)
+                        .progressViewStyle(.linear)
+
+                    HStack {
+                        Text(viewModel.steamInstallStatus)
+                            .font(.subheadline)
+                        Spacer()
+                        if viewModel.steamInstallTotalBytes > 0 {
+                            Text(String(format: "%.0f%%", viewModel.steamInstallProgress * 100))
+                                .font(.subheadline)
+                                .monospacedDigit()
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
+                    HStack {
+                        Spacer()
+                        Button("Cancel") {
+                            viewModel.cancelSteamInstall()
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+                .padding(.vertical, 8)
+            } else if let error = viewModel.steamInstallError {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.red)
+                        Text("Installation Failed")
+                            .bold()
+                            .foregroundColor(.red)
+                    }
+                    Text(error)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    HStack {
+                        Spacer()
+                        Button("Dismiss") {
+                            viewModel.steamInstallError = nil
+                            dismiss()
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button("Retry") {
+                            viewModel.startSteamInstall(targetBottleID: selectedBottleID)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Target Environment:")
+                        .font(.headline)
+
+                    Picker("Environment", selection: $selectedBottleID) {
+                        Text("Create Dedicated Steam Bottle (Recommended)").tag(BottleID?.none)
+                        ForEach(bottles) { bottle in
+                            Text(bottle.name).tag(BottleID?.some(bottle.id))
+                        }
+                    }
+                    .labelsHidden()
+
+                    Text("Official source: cdn.fastly.steamstatic.com\nVerified SHA-256: 7d365453...12bcb")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+
+                    HStack {
+                        Spacer()
+                        Button("Cancel") {
+                            dismiss()
+                        }
+                        .keyboardShortcut(.cancelAction)
+
+                        Button("Download & Install") {
+                            viewModel.startSteamInstall(targetBottleID: selectedBottleID)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.defaultAction)
+                    }
+                }
+            }
+        }
+        .padding(24)
+        .frame(width: 460)
+    }
+}
+
+struct SteamDiscoverySheet: View {
+    @Bindable var viewModel: AppViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Image(systemName: "sparkles")
+                    .foregroundColor(.accentColor)
+                    .font(.title2)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Discovered Steam Games")
+                        .font(.headline)
+                    Text("The following games were found installed in the Steam environment:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+            }
+
+            Divider()
+
+            if viewModel.discoveredSteamGames.isEmpty {
+                Text("No games found in steamapps.")
+                    .foregroundColor(.secondary)
+                    .padding()
+            } else {
+                ScrollView {
+                    VStack(spacing: 8) {
+                        ForEach(viewModel.discoveredSteamGames) { game in
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(game.name)
+                                        .font(.body)
+                                        .bold()
+                                    Text("AppID: \(game.appID) · \(game.relativeExecutablePath ?? "No exe found")")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                }
+                                Spacer()
+                                Button("Add Shortcut") {
+                                    Task {
+                                        await viewModel.addDiscoveredGame(game)
+                                    }
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(game.relativeExecutablePath == nil)
+                            }
+                            .padding(8)
+                            .background(Color(NSColor.controlBackgroundColor))
+                            .cornerRadius(8)
+                        }
+                    }
+                }
+                .frame(maxHeight: 260)
+            }
+
+            HStack {
+                Spacer()
+                Button("Done") {
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 480)
     }
 }

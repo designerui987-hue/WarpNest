@@ -1,11 +1,11 @@
 # WarpNest Development Progress
 
 ## Status Overview
-- **Active Phase:** Phase 2 (Steam Workflow & Installer Handoff Complete)
-- **Current Milestone:** Steam Handoff Verified (48 tests passing across 8 suites)
+- **Active Phase:** Phase 2 (Complete Steam Workflow & Game Discovery Delivered)
+- **Current Milestone:** Phase 2 Complete (53 tests passing across 9 suites)
 - **Repository Branch:** `main`
 - **Host Target:** macOS 14+ / Apple Silicon (`arm64`), Swift 6 toolchain
-- **Automated Test Matrix:** 48 tests across 8 suites passing (`swift test`, 17.8s)
+- **Automated Test Matrix:** 53 tests across 9 suites passing (`swift test`, ~15s)
 
 ---
 
@@ -92,23 +92,38 @@
 
 ---
 
-### Phase 2: Steam Workflow & Installer Handoff (20 Nov 2026)
+### Phase 2: Complete Steam Workflow, Download, Verification & Game Discovery (20-21 Nov 2026)
+- [x] **Secure Official Installer Downloader (`SteamDownloaderService`):**
+  - Official Fastly CDN endpoint (`https://cdn.fastly.steamstatic.com/client/installer/SteamSetup.exe`).
+  - Strict SHA-256 integrity verification against verified checksum (`7d3654531c32d941b8cae81c4137fc542172bfa9635f169cb392f245a0a12bcb`).
+  - Streaming byte-level download with live progress callback `(bytesReceived, totalBytes, fraction)`.
+  - Fast cache check: automatically skips redundant network download when a verified installer is already present on disk.
+- [x] **ACF KeyValues Parser & Steam Game Discovery (`SteamAppDiscoveryService`):**
+  - Parses Valve KeyValues `appmanifest_*.acf` files in `steamapps/` prefixes.
+  - Automatically maps installed Steam games, resolving AppIDs, install directories, and primary executables in `common/<installdir>`.
+  - Exposes `discoverGames(in:)` and library shortcut generation (`addDiscoveredGame`).
+- [x] **In-App Steam Installation & Discovery UI Workflows:**
+  - Dedicated "Install Steam" action in Library header and empty states.
+  - `SteamInstallSheet` with environment selection (create dedicated "Steam" bottle or use existing), live progress bar with MB/percentage, cancellation, and error retry.
+  - Silent setup invocation (`/S`) inside isolated prefix.
+  - `SteamDiscoverySheet` and context menu on Steam items for discovering and adding installed Steam games directly to the WarpNest library.
 - [x] **Installer-to-Installed-App Handoff for Steam:**
   - Added `locateInstalledExecutable(named:in:)` to `BottleService` to locate `Steam.exe` inside bottle prefix hierarchies (`drive_c/Program Files (x86)/Steam/Steam.exe`, `drive_c/Program Files/Steam/Steam.exe`).
   - Added `updateGameTarget` to `LibraryService` to safely mutate and persist the target executable path and name.
   - Implemented automatic detection and confirmation banner in `LibraryView` and `AppViewModel` (`pendingInstallerHandoff`).
   - Preserved standalone executable behavior: standard game shortcuts without installer semantics run normally without handoff prompts.
   - Handled installer failure/cancellation: environment and files are strictly preserved with options to **Retry Setup** or **Choose Installed App…**.
-  - Added regression test suite `SteamInstallerHandoffTests` covering success handoff, cancellation/failure environment preservation, cold-start restart relaunch, and standalone path invariance.
+  - Added regression test suites `SteamInstallerHandoffTests` and `SteamWorkflowTests`.
 
 ---
 
 ## Verified Test Matrix Summary (Commit Baseline)
-- **Total Tests Executed:** 48
-- **Passing:** 48
+- **Total Tests Executed:** 53
+- **Passing:** 53
 - **Failing:** 0
 - **Skipped / Untested:** 0
 - **Suites:**
+  - `Steam Workflow Tests` (5/5 passing - SHA-256 verification, cache hit skip, ACF manifest parser, prefix game discovery, library shortcut handoff)
   - `Steam Installer Handoff Tests` (4/4 passing)
   - `WarpNestCore Metadata & Storage Tests` (6/6 passing)
   - `Bottle & Library Integration Tests` (4/4 passing)
