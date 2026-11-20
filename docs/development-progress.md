@@ -2,10 +2,10 @@
 
 ## Status Overview
 - **Active Phase:** Batch 1 Complete (Truthful Runtime, Lifecycle & Shutdown Correctness) → Ready for Phase 2 (Steam Workflow)
-- **Current Milestone:** Batch 1 Verified & Hardened (40 tests passing across 6 suites)
+- **Current Milestone:** Batch 1 Verified & Hardened (44 tests passing across 7 suites)
 - **Repository Branch:** `main`
 - **Host Target:** macOS 14+ / Apple Silicon (`arm64`), Swift 6 toolchain
-- **Automated Test Matrix:** 40 tests across 6 suites passing (`swift test`, 16.2s)
+- **Automated Test Matrix:** 44 tests across 7 suites passing (`swift test`, 38.0s)
 
 ---
 
@@ -77,8 +77,8 @@
 ---
 
 ## Verified Test Matrix Summary (Commit Baseline)
-- **Total Tests Executed:** 40
-- **Passing:** 40
+- **Total Tests Executed:** 44
+- **Passing:** 44
 - **Failing:** 0
 - **Skipped / Untested:** 0
 - **Suites:**
@@ -86,6 +86,7 @@
   - `Bottle & Library Integration Tests` (4/4 passing)
   - `Archive Security & Integrity Tests` (7/7 passing)
   - `Batch 1 Regression Tests` (11/11 passing)
+  - `Manual Verification Checklist Tests` (4/4 passing)
   - `ProcessSupervisor Tests` (6/6 passing)
   - `Real Wine Runtime Demonstration Tests` (6/6 passing — real prefix creation, WineMine launch, lifecycle)
 
