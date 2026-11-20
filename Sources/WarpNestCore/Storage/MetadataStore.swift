@@ -40,6 +40,9 @@ public actor MetadataStore {
 
     /// Default application support directory for WarpNest.
     public static var defaultAppSupportDirectory: URL {
+        if let override = ProcessInfo.processInfo.environment["WARPNEST_DATA_DIR"], !override.isEmpty {
+            return URL(fileURLWithPath: override, isDirectory: true)
+        }
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         return appSupport.appendingPathComponent("WarpNest", isDirectory: true)
     }

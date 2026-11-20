@@ -427,7 +427,7 @@ public actor LibraryService {
         // Unlock bottle with matching lease token
         _ = await bottleService.releaseLock(lease: session.lockLease)
         activeSessions.removeValue(forKey: id)
-        transitionState(for: id, state: status.exitCode == 0 ? .stopped : .failed)
+        transitionState(for: id, state: (status.exitCode == 0 || status.wasCancelled) ? .stopped : .failed)
     }
 
     /// Stops a running game session and stops associated prefix services (wineserver -k).

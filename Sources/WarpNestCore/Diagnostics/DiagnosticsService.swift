@@ -43,11 +43,14 @@ public struct DiagnosticsService: Sendable {
         let testProcess = Process()
         testProcess.executableURL = URL(fileURLWithPath: "/usr/bin/arch")
         testProcess.arguments = ["-x86_64", "/usr/bin/uname", "-m"]
-        let pipe = Pipe()
-        testProcess.standardOutput = pipe
-        try? testProcess.run()
-        testProcess.waitUntilExit()
-        isRosetta = testProcess.terminationStatus == 0
+        testProcess.standardOutput = FileHandle.nullDevice
+        do {
+            try testProcess.run()
+            testProcess.waitUntilExit()
+            isRosetta = testProcess.terminationStatus == 0
+        } catch {
+            isRosetta = false
+        }
         #endif
 
         let fileManager = FileManager.default
@@ -80,7 +83,10 @@ public struct DiagnosticsService: Sendable {
 
     /// Prepares an exportable JSON report string.
     public func exportDiagnosticReport() -> String {
-        let diag = gatherDiagnostics()
+        exportDiagnosticReport(gatherDiagnostics())
+    }
+
+    public func exportDiagnosticReport(_ diag: SystemDiagnostics) -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601

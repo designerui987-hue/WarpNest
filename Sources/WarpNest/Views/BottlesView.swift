@@ -11,6 +11,28 @@ struct BottlesView: View {
     @State private var graphicsBackend: GraphicsBackend = .automatic
     @State private var is64Bit: Bool = true
     @State private var createError: String?
+    @State private var isCreating = false
+    @State private var showsAdvancedOptions = false
+
+    private var availableRuntimes: [RuntimeDescriptor] {
+        viewModel.registeredRuntimes.filter {
+            $0.isVerified && (!$0.isSimulation || viewModel.appSettings.developerModeEnabled)
+        }.sorted {
+            if $0.isSimulation != $1.isSimulation { return !$0.isSimulation }
+            return $0.rootPath < $1.rootPath
+        }
+    }
+
+    private func beginCreation() {
+        newBottleName = ""
+        selectedRuntimeID = availableRuntimes.first?.id
+        graphicsBackend = .automatic
+        syncBackend = viewModel.appSettings.defaultSyncBackend
+        is64Bit = true
+        showsAdvancedOptions = false
+        createError = nil
+        showingCreateBottleSheet = true
+    }
 
     // Backup & Restore state
     @State private var showingRestoreSheet = false
@@ -28,7 +50,7 @@ struct BottlesView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("Wine Bottles")
+                Text("Windows Environments")
                     .font(.title2)
                     .bold()
 
@@ -54,13 +76,12 @@ struct BottlesView: View {
                 .disabled(isRestoring)
 
                 Button {
-                    createError = nil
-                    syncBackend = viewModel.appSettings.defaultSyncBackend
-                    showingCreateBottleSheet = true
+                    beginCreation()
                 } label: {
-                    Label("New Bottle", systemImage: "plus")
+                    Label("New Environment", systemImage: "plus")
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(availableRuntimes.isEmpty)
             }
             .padding()
 
@@ -71,29 +92,20 @@ struct BottlesView: View {
                     Image(systemName: "shippingbox")
                         .font(.system(size: 48))
                         .foregroundColor(.secondary)
-                    Text("No Bottles Found")
-                        .font(.title2)
-                        .bold()
-                    Text("Bottles are isolated Windows environments that hold your games, registry, and dependencies.")
-                        .foregroundColor(.secondary)
+                    Text("Set up a Windows environment")
+                        .font(.title2.bold())
+                    Text("An environment holds the Windows files and settings for your games and apps.")
+                        .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
-                        .frame(maxWidth: 400)
+                        .frame(maxWidth: 380)
 
-                    if viewModel.registeredRuntimes.isEmpty {
-                        Text("No verified compatibility runtimes found. Please import a Wine runtime or enable Developer Mode in Settings.")
-                            .font(.caption)
-                            .foregroundColor(.orange)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal)
+                    if availableRuntimes.isEmpty {
+                        Button("Set Up Wine in Settings") { viewModel.selectedTab = .settings }
+                            .buttonStyle(.borderedProminent)
+                    } else {
+                        Button("Create Environment", action: beginCreation)
+                            .buttonStyle(.borderedProminent)
                     }
-
-                    Button("Create First Bottle") {
-                        createError = nil
-                        syncBackend = viewModel.appSettings.defaultSyncBackend
-                        showingCreateBottleSheet = true
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(viewModel.registeredRuntimes.isEmpty)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -256,109 +268,78 @@ struct BottlesView: View {
         }
         .sheet(isPresented: $showingCreateBottleSheet) {
             VStack(alignment: .leading, spacing: 16) {
-                Text("Create New Bottle")
-                    .font(.headline)
+                Text("New Windows Environment")
+                    .font(.title2.bold())
 
-                TextField("Bottle Name (e.g. Steam Games)", text: $newBottleName)
+                TextField("Environment name (for example, Steam Games)", text: $newBottleName)
                     .textFieldStyle(.roundedBorder)
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Compatibility Runtime")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                Picker("Wine runtime", selection: $selectedRuntimeID) {
+                    ForEach(availableRuntimes) { runtime in
+                        Text(runtime.isSimulation ? "Simulated runtime (testing only)" : "\(runtime.name) · \(runtime.version)")
+                            .tag(runtime.id as RuntimeID?)
+                    }
+                }
 
-                    if viewModel.registeredRuntimes.isEmpty {
-                        Text("No verified runtimes registered. Install Wine or enable Developer Mode.")
-                            .font(.caption)
-                            .foregroundColor(.red)
-                    } else {
-                        Picker("Runtime", selection: $selectedRuntimeID) {
-                            Text("Select runtime...").tag(nil as RuntimeID?)
-                            ForEach(viewModel.registeredRuntimes) { r in
-                                Text("\(r.name) (\(r.version))\(r.isSimulation ? " [SIMULATED]" : (r.isVerified ? "" : " [UNVERIFIED]"))")
-                                    .tag(r.id as RuntimeID?)
+                DisclosureGroup("Advanced options", isExpanded: $showsAdvancedOptions) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Picker("Synchronization", selection: $syncBackend) {
+                            ForEach(SyncBackend.allCases, id: \.self) { backend in
+                                Text(backend.rawValue).tag(backend)
                             }
                         }
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Threading Synchronization")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Picker("Sync Backend", selection: $syncBackend) {
-                        ForEach(SyncBackend.allCases, id: \.self) { backend in
-                            Text(backend.rawValue).tag(backend)
+                        Picker("Graphics", selection: $graphicsBackend) {
+                            ForEach(GraphicsBackend.allCases.filter { $0.isSupported }, id: \.self) { backend in
+                                Text(backend.displayName).tag(backend)
+                            }
                         }
+                        Toggle("64-bit environment", isOn: $is64Bit)
                     }
+                    .padding(.top, 8)
                 }
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Graphics Backend")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Picker("Graphics Backend", selection: $graphicsBackend) {
-                        ForEach(GraphicsBackend.allCases, id: \.self) { backend in
-                            Text(backend.displayName + (backend.isSupported ? "" : " (Unavailable)")).tag(backend)
-                        }
-                    }
-                    Text(graphicsBackend.capabilityNote)
-                        .font(.caption)
-                        .foregroundColor(graphicsBackend.isSupported ? .secondary : .red)
-                }
-
-                Toggle("64-bit Architecture (WoW64)", isOn: $is64Bit)
-
-                if let err = createError {
-                    Text(err)
-                        .font(.caption)
-                        .foregroundColor(.red)
+                if let createError {
+                    Text(createError).foregroundStyle(.red)
                 }
 
                 HStack {
-                    Spacer()
-                    Button("Cancel") {
-                        showingCreateBottleSheet = false
+                    if isCreating {
+                        ProgressView().controlSize(.small)
+                        Text("Preparing Windows files…")
                     }
+                    Spacer()
+                    Button("Cancel") { showingCreateBottleSheet = false }
+                        .keyboardShortcut(.cancelAction)
                     Button("Create") {
-                        let targetRuntimeID = selectedRuntimeID ?? viewModel.registeredRuntimes.first?.id
-                        guard let runtimeID = targetRuntimeID else {
-                            createError = "Please select a verified runtime."
-                            return
-                        }
-                        guard graphicsBackend.isSupported else {
-                            createError = "Selected graphics backend is unavailable: \(graphicsBackend.displayName). Please choose Automatic or WineD3D."
-                            return
-                        }
-
+                        guard !isCreating, let runtimeID = selectedRuntimeID,
+                              availableRuntimes.contains(where: { $0.id == runtimeID }) else { return }
                         let config = BottleConfiguration(
-                            win64: is64Bit,
-                            graphicsBackend: graphicsBackend,
-                            syncBackend: syncBackend,
+                            win64: is64Bit, graphicsBackend: graphicsBackend, syncBackend: syncBackend,
                             highResolutionMode: viewModel.appSettings.defaultHighResolutionMode
                         )
-
+                        let name = newBottleName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let firstEnvironment = viewModel.bottles.isEmpty
+                        isCreating = true
+                        createError = nil
                         Task {
+                            defer { isCreating = false }
                             do {
-                                try await viewModel.createBottle(
-                                    name: newBottleName.isEmpty ? "New Bottle" : newBottleName,
-                                    runtimeID: runtimeID,
-                                    configuration: config
-                                )
+                                try await viewModel.createBottle(name: name, runtimeID: runtimeID, configuration: config)
                                 showingCreateBottleSheet = false
-                                newBottleName = ""
-                                createError = nil
+                                if firstEnvironment { viewModel.selectedTab = .library }
                             } catch {
                                 createError = error.localizedDescription
                             }
                         }
                     }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(viewModel.registeredRuntimes.isEmpty)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(newBottleName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || selectedRuntimeID == nil)
                 }
             }
-            .padding()
-            .frame(width: 440)
+            .disabled(isCreating)
+            .interactiveDismissDisabled(isCreating)
+            .padding(24)
+            .frame(width: 460)
         }
     }
 }

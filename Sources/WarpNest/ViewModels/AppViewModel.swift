@@ -14,7 +14,6 @@ public final class AppViewModel {
     public var isGridView: Bool = true
     public var activeSessionStates: [GameID: SessionState] = [:]
     public var diagnostics: SystemDiagnostics?
-    public var liveLogs: [String] = []
     public var appSettings: AppSettings = AppSettings()
     public var errorMessage: String?
     public var showingErrorAlert: Bool = false
@@ -32,13 +31,32 @@ public final class AppViewModel {
         self.libraryService = LibraryService(metadataStore: store, bottleService: bService)
     }
 
+    private var startupTask: Task<Void, Never>?
+    public private(set) var isLoadingLibrary = true
+
     public func initializeApp() async {
+        if let startupTask {
+            await startupTask.value
+            return
+        }
+        let task = Task { await loadInitialState() }
+        startupTask = task
+        await task.value
+    }
+
+    private func loadInitialState() async {
         // Load persisted settings
         if let settings = try? await metadataStore.load(AppSettings.self, from: "settings.json", fallback: AppSettings()) {
             self.appSettings = settings
         }
 
-        // Developer mode simulation adapter handling (WN-09)
+        await updateSimulationRuntime()
+        await rehydrateAndDiscoverRuntimes()
+        await reloadData()
+        isLoadingLibrary = false
+    }
+
+    public func updateSimulationRuntime() async {
         let simulationID = RuntimeID.simulation
         if appSettings.developerModeEnabled {
             let testAdapter = TestRuntimeAdapter()
@@ -48,11 +66,7 @@ public final class AppViewModel {
             await bottleService.unregisterAdapter(id: RuntimeID.legacySimulation)
         }
 
-        // Rehydrate persisted runtimes, then discover new Wine runtimes (WN-03)
-        await rehydrateAndDiscoverRuntimes()
-
-        diagnostics = diagnosticsService.gatherDiagnostics()
-        await reloadData()
+        await updateRegisteredRuntimes()
     }
 
     public func saveSettings() async {
@@ -194,9 +208,6 @@ public final class AppViewModel {
                 await libraryService.setStateListener(for: game.id) { [weak self] newState in
                     Task { @MainActor [weak self] in
                         self?.activeSessionStates[game.id] = newState
-                        if let gid = self?.selectedGameID, gid == game.id {
-                            await self?.updateLogs(for: game.id)
-                        }
                     }
                 }
             }
@@ -248,18 +259,9 @@ public final class AppViewModel {
         if currentState == .running || currentState == .stopFailed {
             activeSessionStates[game.id] = .stopping
             await libraryService.stopGame(id: game.id)
+            activeSessionStates[game.id] = await libraryService.getSessionState(for: game.id)
         } else {
             activeSessionStates[game.id] = .preparing
-            // Attach live log listener for active game (WN-10)
-            let buffer = await libraryService.getLogBuffer(for: game.id)
-            buffer.setLineHandler { [weak self] _ in
-                Task { @MainActor [weak self] in
-                    if self?.selectedGameID == game.id {
-                        self?.liveLogs = buffer.getAllLines()
-                    }
-                }
-            }
-
             do {
                 try await libraryService.launchGame(id: game.id)
                 // State transitions (.running, .failed, .stopped) are driven by the authoritative state listener (WN-10)
@@ -268,12 +270,14 @@ public final class AppViewModel {
                 showError("Launch error: \(error.localizedDescription)")
             }
         }
-        await updateLogs(for: game.id)
     }
 
-    public func updateLogs(for gameID: GameID) async {
-        let buffer = await libraryService.getLogBuffer(for: gameID)
-        liveLogs = buffer.getAllLines()
+    public func refreshDiagnostics() async {
+        let snapshot = await Task.detached(priority: .utility) { [diagnosticsService] in
+            diagnosticsService.gatherDiagnostics()
+        }.value
+        guard !Task.isCancelled else { return }
+        diagnostics = snapshot
     }
 
     public func backupBottle(id: BottleID, to destinationURL: URL) async throws {
@@ -304,7 +308,7 @@ public final class AppViewModel {
 
 public enum SidebarSection: String, CaseIterable, Identifiable {
     case library = "Library"
-    case bottles = "Bottles"
+    case bottles = "Environments"
     case diagnostics = "Diagnostics"
     case settings = "Settings"
 

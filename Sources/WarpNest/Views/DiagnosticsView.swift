@@ -3,9 +3,16 @@ import WarpNestCore
 
 struct DiagnosticsView: View {
     @Bindable var viewModel: AppViewModel
-    @State private var showingCopiedAlert = false
+    @State private var liveLogs: [String] = []
+
+    private struct LogSelection: Equatable {
+        let id: GameID?
+        let state: SessionState
+    }
 
     var body: some View {
+        let gameID = viewModel.selectedGameID
+        let selection = LogSelection(id: gameID, state: gameID.flatMap { viewModel.activeSessionStates[$0] } ?? .stopped)
         VStack(spacing: 0) {
             HStack {
                 Text("System Diagnostics & Logs")
@@ -15,14 +22,15 @@ struct DiagnosticsView: View {
                 Spacer()
 
                 Button {
-                    let text = viewModel.diagnosticsService.exportDiagnosticReport()
+                    guard let snapshot = viewModel.diagnostics else { return }
+                    let text = viewModel.diagnosticsService.exportDiagnosticReport(snapshot)
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(text, forType: .string)
-                    showingCopiedAlert = true
                 } label: {
                     Label("Copy Report", systemImage: "doc.on.doc")
                 }
                 .buttonStyle(.bordered)
+                .disabled(viewModel.diagnostics == nil)
             }
             .padding()
 
@@ -71,16 +79,18 @@ struct DiagnosticsView: View {
                             }
                             .padding(8)
                         }
+                    } else {
+                        ProgressView("Checking your Mac…")
                     }
 
                     GroupBox("Recent Execution Logs") {
-                        if viewModel.liveLogs.isEmpty {
-                            Text("No recent log activity. Launch a game or initialize a bottle to view live supervisor output.")
+                        if liveLogs.isEmpty {
+                            Text("Launch a game or app to see its recent activity here.")
                                 .foregroundColor(.secondary)
                                 .padding(8)
                         } else {
                             ScrollView {
-                                Text(viewModel.liveLogs.joined(separator: "\n"))
+                                Text(liveLogs.joined(separator: "\n"))
                                     .font(.system(.caption, design: .monospaced))
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .padding(8)
@@ -92,6 +102,21 @@ struct DiagnosticsView: View {
                     }
                 }
                 .padding()
+            }
+        }
+        .task { await viewModel.refreshDiagnostics() }
+        .task(id: selection) {
+            guard let id = selection.id else {
+                liveLogs = []
+                return
+            }
+            let buffer = await viewModel.libraryService.getLogBuffer(for: id)
+            while !Task.isCancelled {
+                let lines = buffer.getAllLines()
+                if liveLogs != lines { liveLogs = lines }
+                // Inactive sessions need only their final snapshot.
+                guard selection.state != .stopped && selection.state != .failed else { return }
+                do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
             }
         }
     }

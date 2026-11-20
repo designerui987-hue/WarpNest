@@ -9,7 +9,7 @@ struct SettingsView: View {
         Form {
             Section("Compatibility Runtimes") {
                 if viewModel.registeredRuntimes.isEmpty {
-                    Text("No verified compatibility runtimes found. Import a Wine runtime layout to get started.")
+                    Text("Wine runs compatible Windows games and apps on your Mac. If Wine is already installed, choose its app or installation folder below.")
                         .foregroundColor(.secondary)
                 } else {
                     ForEach(viewModel.registeredRuntimes) { r in
@@ -52,7 +52,10 @@ struct SettingsView: View {
                     }
                 }
 
-                Button("Import Wine Runtime...") {
+                if viewModel.registeredRuntimes.allSatisfy({ !$0.isVerified || $0.isSimulation }) {
+                    Link("Get Wine for macOS", destination: URL(string: "https://gitlab.winehq.org/wine/wine/-/wikis/MacOS")!)
+                }
+                Button("Choose Wine Installation…") {
                     let panel = NSOpenPanel()
                     panel.canChooseFiles = true
                     panel.canChooseDirectories = true
@@ -71,7 +74,7 @@ struct SettingsView: View {
                     .onChange(of: viewModel.appSettings.developerModeEnabled) { _, _ in
                         Task {
                             await viewModel.saveSettings()
-                            await viewModel.initializeApp()
+                            await viewModel.updateSimulationRuntime()
                         }
                     }
                 Text("When enabled, adds a mock simulation runtime for testing UI workflows without external Wine dependencies. Simulated runtimes are never presented as real Wine engines.")

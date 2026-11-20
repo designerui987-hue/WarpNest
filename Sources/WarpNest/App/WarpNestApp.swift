@@ -14,15 +14,20 @@ struct MainWindowView: View {
             .navigationTitle("WarpNest")
             .listStyle(.sidebar)
         } detail: {
-            switch viewModel.selectedTab {
-            case .library:
-                LibraryView(viewModel: viewModel)
-            case .bottles:
-                BottlesView(viewModel: viewModel)
-            case .diagnostics:
-                DiagnosticsView(viewModel: viewModel)
-            case .settings:
-                SettingsView(viewModel: viewModel)
+            if viewModel.isLoadingLibrary {
+                ProgressView("Opening your library…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                switch viewModel.selectedTab {
+                case .library:
+                    LibraryView(viewModel: viewModel)
+                case .bottles:
+                    BottlesView(viewModel: viewModel)
+                case .diagnostics:
+                    DiagnosticsView(viewModel: viewModel)
+                case .settings:
+                    SettingsView(viewModel: viewModel)
+                }
             }
         }
         .frame(minWidth: 900, minHeight: 600)
@@ -41,6 +46,15 @@ struct MainWindowView: View {
 struct WarpNestApp: App {
     // Single application-scoped service container shared by all windows (WN-06)
     @State private var sharedViewModel = AppViewModel()
+
+    init() {
+        if CommandLine.arguments.contains("--verify-gamer-ux") {
+            Task { @MainActor in
+                await executeGamerUXVerification()
+                exit(0)
+            }
+        }
+    }
 
     var body: some Scene {
         WindowGroup {

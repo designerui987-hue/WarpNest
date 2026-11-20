@@ -1,204 +1,200 @@
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 import WarpNestCore
 
 struct LibraryView: View {
     @Bindable var viewModel: AppViewModel
-    @State private var showingAddGameSheet = false
-    @State private var newGameName = ""
-    @State private var newGameBottleID: BottleID?
-    @State private var newGameExecutable = ""
-    @State private var isExternalExecutable = false
-    @State private var validationError: String?
+    @State private var showingAddSheet = false
 
-    var body: some View {
-        VStack(spacing: 0) {
-            // Toolbar header
-            HStack {
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundColor(.secondary)
-                    TextField("Search library...", text: $viewModel.searchQuery)
-                        .textFieldStyle(.plain)
-                }
-                .padding(7)
-                .background(Color(NSColor.controlBackgroundColor))
-                .cornerRadius(8)
-                .frame(maxWidth: 320)
+    private var availableBottles: [Bottle] {
+        let runtimeIDs = Set(viewModel.registeredRuntimes.filter {
+            $0.isVerified && (!$0.isSimulation || viewModel.appSettings.developerModeEnabled)
+        }.map(\.id))
+        return viewModel.bottles.filter { runtimeIDs.contains($0.runtimeID) }
+    }
 
-                Spacer()
-
-                Picker("View Style", selection: $viewModel.isGridView) {
-                    Image(systemName: "square.grid.2x2").tag(true)
-                    Image(systemName: "list.bullet").tag(false)
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 80)
-
-                Button {
-                    validationError = nil
-                    showingAddGameSheet = true
-                } label: {
-                    Label("Add Game", systemImage: "plus")
-                }
-                .buttonStyle(.borderedProminent)
-            }
-            .padding()
-
-            Divider()
-
-            if viewModel.filteredGames.isEmpty {
-                VStack(spacing: 16) {
-                    Image(systemName: "gamecontroller")
-                        .font(.system(size: 48))
-                        .foregroundColor(.secondary)
-                    Text("No Games in Library")
-                        .font(.title2)
-                        .bold()
-                    Text("Create a bottle and add a Windows executable (.exe) to start playing.")
-                        .foregroundColor(.secondary)
-                    Button("Add Game") {
-                        validationError = nil
-                        showingAddGameSheet = true
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                if viewModel.isGridView {
-                    ScrollView {
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 220, maximum: 280), spacing: 20)], spacing: 20) {
-                            ForEach(viewModel.filteredGames) { game in
-                                GameCardView(viewModel: viewModel, game: game)
-                            }
-                        }
-                        .padding(20)
-                    }
-                } else {
-                    List(viewModel.filteredGames) { game in
-                        GameListRowView(viewModel: viewModel, game: game)
-                    }
-                }
-            }
-        }
-        .sheet(isPresented: $showingAddGameSheet) {
-            addGameSheet
+    private var hasRuntime: Bool {
+        viewModel.registeredRuntimes.contains {
+            $0.isVerified && (!$0.isSimulation || viewModel.appSettings.developerModeEnabled)
         }
     }
 
-    private var addGameSheet: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Add Game Shortcut")
-                .font(.headline)
-
-            TextField("Game Name", text: $newGameName)
-                .textFieldStyle(.roundedBorder)
-
-            if viewModel.bottles.isEmpty {
-                Text("Please create a bottle first.")
-                    .foregroundColor(.red)
-                    .font(.caption)
-            } else {
-                Picker("Target Bottle", selection: $newGameBottleID) {
-                    Text("Select a bottle...").tag(nil as BottleID?)
-                    ForEach(viewModel.bottles) { bottle in
-                        Text(bottle.name).tag(bottle.id as BottleID?)
-                    }
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Windows Executable (.exe)")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+    var body: some View {
+        let matches = viewModel.filteredGames
+        let simulations = Set(viewModel.bottles.filter { $0.runtimeID == .simulation }.map(\.id))
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
                 HStack {
-                    TextField("Relative path (e.g. drive_c/game.exe)", text: $newGameExecutable)
-                        .textFieldStyle(.roundedBorder)
-                    Button("Browse...") {
-                        let panel = NSOpenPanel()
-                        panel.allowedContentTypes = []
-                        panel.canChooseFiles = true
-                        panel.canChooseDirectories = false
-                        panel.allowsMultipleSelection = false
-                        if let selectedBottle = viewModel.bottles.first(where: { $0.id == (newGameBottleID ?? viewModel.bottles.first?.id) }) {
-                            panel.directoryURL = URL(fileURLWithPath: selectedBottle.directoryPath)
-                        }
-                        if panel.runModal() == .OK, let url = panel.url {
-                            if let selectedBottle = viewModel.bottles.first(where: { $0.id == (newGameBottleID ?? viewModel.bottles.first?.id) }) {
-                                let resolvedPrefix = URL(fileURLWithPath: selectedBottle.directoryPath).resolvingSymlinksInPath()
-                                let resolvedSelected = url.resolvingSymlinksInPath()
-                                let prefixPath = resolvedPrefix.path.hasSuffix("/") ? resolvedPrefix.path : resolvedPrefix.path + "/"
-                                if resolvedSelected.path.hasPrefix(prefixPath) {
-                                    let rel = String(resolvedSelected.path.dropFirst(prefixPath.count))
-                                    newGameExecutable = rel
-                                    isExternalExecutable = false
-                                } else {
-                                    newGameExecutable = resolvedSelected.path
-                                    isExternalExecutable = true
-                                }
-                            }
-                        }
-                    }
+                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary).accessibilityHidden(true)
+                    TextField("Search games and apps", text: $viewModel.searchQuery)
+                        .textFieldStyle(.plain)
                 }
-            }
-
-            if isExternalExecutable {
-                Text("Selected executable is outside the bottle. It will run with this bottle's prefix as an external installer/application.")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            }
-
-            if let err = validationError {
-                Text(err)
-                    .font(.caption)
-                    .foregroundColor(.red)
-            }
-
-            HStack {
+                .padding(7)
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                .frame(maxWidth: 320)
                 Spacer()
-                Button("Cancel") {
-                    showingAddGameSheet = false
+                Picker("Library layout", selection: $viewModel.isGridView) {
+                    Label("Grid", systemImage: "square.grid.2x2").tag(true)
+                    Label("List", systemImage: "list.bullet").tag(false)
                 }
-                Button("Add") {
-                    let targetBottleID = newGameBottleID ?? viewModel.bottles.first?.id
-                    guard let bottleID = targetBottleID else {
-                        validationError = "Please select a bottle."
-                        return
-                    }
-                    guard !newGameExecutable.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                        validationError = "Executable path cannot be empty."
-                        return
-                    }
-
-                    Task {
-                        do {
-                            try await viewModel.addGame(
-                                name: newGameName.isEmpty ? "New Game" : newGameName,
-                                bottleID: bottleID,
-                                executablePath: newGameExecutable,
-                                isExternalExecutable: isExternalExecutable
-                            )
-                            showingAddGameSheet = false
-                            newGameName = ""
-                            newGameExecutable = ""
-                            isExternalExecutable = false
-                            validationError = nil
-                        } catch {
-                            validationError = error.localizedDescription
-                        }
-                    }
+                .labelStyle(.iconOnly)
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .frame(width: 80)
+                if !viewModel.games.isEmpty {
+                    Button(action: openSetupOrAdd) { Label("Add game or app", systemImage: "plus") }
+                        .buttonStyle(.borderedProminent)
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(viewModel.bottles.isEmpty)
+            }
+            .padding()
+            Divider()
+            if viewModel.games.isEmpty {
+                ContentUnavailableView {
+                    Label("Your game and app library", systemImage: "gamecontroller")
+                } description: {
+                    Text(!hasRuntime ? "Import a Wine runtime in Settings to run Windows games and apps on this Mac."
+                         : availableBottles.isEmpty ? "Create an environment (bottle) to hold your Windows files and settings."
+                         : "Choose a Windows game, app, or installer to add its shortcut.")
+                } actions: {
+                    Button(!hasRuntime ? "Set up Wine" : availableBottles.isEmpty ? "Set up an environment" : "Add game or app",
+                           action: openSetupOrAdd)
+                        .buttonStyle(.borderedProminent)
+                }
+            } else if matches.isEmpty {
+                ContentUnavailableView {
+                    Label("No matching games or apps", systemImage: "magnifyingglass")
+                } description: {
+                    Text("Try a different name.")
+                } actions: {
+                    Button("Clear search") { viewModel.searchQuery = "" }
+                }
+            } else if viewModel.isGridView {
+                ScrollView {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 200, maximum: 300), spacing: 16)], spacing: 16) {
+                        ForEach(matches) { game in GameCardView(viewModel: viewModel, game: game, simulated: simulations.contains(game.bottleID)) }
+                    }
+                    .padding(20)
+                }
+            } else {
+                List(matches) { game in GameListRowView(viewModel: viewModel, game: game, simulated: simulations.contains(game.bottleID)) }
             }
         }
-        .padding()
-        .frame(width: 460)
+        .navigationTitle("Library")
+        .sheet(isPresented: $showingAddSheet) {
+            AddShortcutSheet(viewModel: viewModel, bottles: availableBottles)
+        }
+    }
+
+    private func openSetupOrAdd() {
+        if !hasRuntime { viewModel.selectedTab = .settings }
+        else if availableBottles.isEmpty { viewModel.selectedTab = .bottles }
+        else { showingAddSheet = true }
+    }
+}
+
+private struct AddShortcutSheet: View {
+    let viewModel: AppViewModel
+    let bottles: [Bottle]
+    @Environment(\.dismiss) private var dismiss
+    @State private var bottleID: BottleID?
+    @State private var file: URL?
+    @State private var name = ""
+    @State private var error: String?
+    @State private var saving = false
+
+    init(viewModel: AppViewModel, bottles: [Bottle]) {
+        self.viewModel = viewModel
+        self.bottles = bottles
+        _bottleID = State(initialValue: bottles.count == 1 ? bottles.first?.id : nil)
+    }
+
+    private var bottle: Bottle? { bottles.first { $0.id == bottleID } }
+
+    // Resolve the selected file against the actual destination at submission time.
+    private var target: (path: String, external: Bool)? {
+        guard let file, let bottle else { return nil }
+        let prefix = URL(fileURLWithPath: bottle.directoryPath).resolvingSymlinksInPath().standardizedFileURL.path + "/"
+        let path = file.resolvingSymlinksInPath().standardizedFileURL.path
+        return path.hasPrefix(prefix) ? (String(path.dropFirst(prefix.count)), false) : (path, true)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Add game or app").font(.title2.bold())
+            Picker("Environment", selection: $bottleID) {
+                Text("Choose an environment").tag(nil as BottleID?)
+                ForEach(bottles) { b in
+                    Text(b.runtimeID == .simulation ? "\(b.name) (Simulated)" : b.name).tag(Optional(b.id))
+                }
+            }
+            .onChange(of: bottleID) { _, _ in
+                file = nil
+                name = ""
+                error = nil
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Button(file == nil ? "Choose Windows file…" : "Change Windows file…", action: chooseFile)
+                    .disabled(bottle == nil)
+                Text(file?.lastPathComponent ?? "Select the .exe for your game, app, or installer.")
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                if target?.external == true {
+                    Text("This shortcut uses the file at its current location. Moving it will break the shortcut.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            TextField("Library name", text: $name)
+                .textFieldStyle(.roundedBorder)
+            if let error { Text(error).foregroundStyle(.red) }
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Add to library", action: save)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(target == nil || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(24)
+        .frame(width: 440)
+        .disabled(saving)
+        .interactiveDismissDisabled(saving)
+    }
+
+    private func chooseFile() {
+        guard let bottle else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [UTType(filenameExtension: "exe") ?? .data]
+        panel.directoryURL = URL(fileURLWithPath: bottle.directoryPath).appendingPathComponent("drive_c")
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let suggested = url.deletingPathExtension().lastPathComponent
+        if name.isEmpty || name == file?.deletingPathExtension().lastPathComponent { name = suggested }
+        file = url
+        error = nil
+    }
+
+    private func save() {
+        guard !saving, let bottle, let target else { return }
+        saving = true
+        Task {
+            defer { saving = false }
+            do {
+                try await viewModel.addGame(name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+                                            bottleID: bottle.id, executablePath: target.path,
+                                            isExternalExecutable: target.external)
+                viewModel.searchQuery = ""
+                dismiss()
+            } catch { self.error = error.localizedDescription }
+        }
     }
 }
 
 struct GameCardView: View {
     let viewModel: AppViewModel
     let game: GameItem
+    let simulated: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -222,6 +218,7 @@ struct GameCardView: View {
                     Circle()
                         .fill(circleColor(for: state))
                         .frame(width: 8, height: 8)
+                    if simulated { Text("Simulated").font(.caption) }
                     Text(state.rawValue)
                         .font(.caption)
                         .foregroundColor(.secondary)
@@ -246,6 +243,7 @@ struct GameCardView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(isRunning ? .red : .accentColor)
                 .disabled(isTransitioning)
+                .accessibilityLabel("\(buttonTitle) \(game.name)")
             }
         }
         .padding(12)
@@ -270,6 +268,7 @@ struct GameCardView: View {
 struct GameListRowView: View {
     let viewModel: AppViewModel
     let game: GameItem
+    let simulated: Bool
 
     var body: some View {
         HStack(spacing: 16) {
@@ -281,7 +280,9 @@ struct GameListRowView: View {
                 Text(game.name)
                     .font(.body)
                     .bold()
-                Text(game.executableRelativePath)
+                Text(simulated ? "Simulated · " + game.executableRelativePath : game.executableRelativePath)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -305,6 +306,7 @@ struct GameListRowView: View {
             .buttonStyle(.bordered)
             .tint(isRunning ? .red : .accentColor)
             .disabled(isTransitioning)
+            .accessibilityLabel("\(buttonTitle) \(game.name)")
         }
         .padding(.vertical, 4)
     }
