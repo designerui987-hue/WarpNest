@@ -5,6 +5,18 @@ import Foundation
 @Suite("Steam Installer Handoff Tests")
 struct SteamInstallerHandoffTests {
 
+    @Test("Steam display modes survive launch and older saved presets use software rendering")
+    func steamDisplayArguments() {
+        let path = "drive_c/Program Files (x86)/Steam/Steam.exe"
+        #expect(SteamDisplayOptions.launchArguments(path: path, saved: []) == [])
+        #expect(SteamDisplayOptions.launchArguments(path: path, saved: ["/S"]) == [])
+        #expect(SteamDisplayOptions.launchArguments(path: path, saved: ["-gamepadui"]) == ["-gamepadui"])
+        let old = ["-cef-disable-gpu", "-cef-disable-gpu-compositing", "-no-cef-sandbox"]
+        #expect(SteamDisplayOptions.launchArguments(path: path, saved: old) == SteamDisplayOptions.softwareRendering)
+        #expect(SteamDisplayOptions.launchArguments(path: "SteamSetup.exe", saved: ["/S"]) == ["/S"])
+        #expect(SteamDisplayOptions.launchArguments(path: path + ".backup", saved: old) == old)
+    }
+
     // MARK: - 1. Success Flow
     @Test("Steam installer success handoff: locates Steam.exe, confirms handoff, persists target, and launches Steam")
     func testSteamInstallerSuccessHandoffAndLaunch() async throws {

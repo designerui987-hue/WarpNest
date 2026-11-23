@@ -296,7 +296,7 @@ struct GameCardView: View {
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .contextMenu {
-            if game.name.localizedCaseInsensitiveContains("steam") || game.executableRelativePath.localizedCaseInsensitiveContains("steam") {
+            if !game.isInstaller && SteamDisplayOptions.isClient(game.executableRelativePath) {
                 Button {
                     Task { await viewModel.discoverSteamGames(in: game.bottleID) }
                 } label: {
@@ -305,40 +305,7 @@ struct GameCardView: View {
 
                 Divider()
 
-                Menu("Steam Display / Mode") {
-                    Button("Safe Graphics (Fix CEF Black Screen)") {
-                        Task {
-                            await viewModel.setGameArguments(
-                                for: game.id,
-                                arguments: ["-cef-disable-gpu", "-cef-disable-gpu-compositing", "-cef-disable-d3d11", "-no-cef-sandbox"]
-                            )
-                        }
-                    }
-
-                    Button("Small Mode (No Browser / Minimal List)") {
-                        Task {
-                            await viewModel.setGameArguments(
-                                for: game.id,
-                                arguments: ["-no-browser", "+open", "steam://open/minigameslist"]
-                            )
-                        }
-                    }
-
-                    Button("Big Picture / Gamepad Mode") {
-                        Task {
-                            await viewModel.setGameArguments(
-                                for: game.id,
-                                arguments: ["-gamepadui"]
-                            )
-                        }
-                    }
-
-                    Button("Standard Mode") {
-                        Task {
-                            await viewModel.setGameArguments(for: game.id, arguments: [])
-                        }
-                    }
-                }
+                SteamDisplayMenu(viewModel: viewModel, game: game)
             }
         }
     }
@@ -378,7 +345,7 @@ struct GameListRowView: View {
         }
         .padding(.vertical, 4)
         .contextMenu {
-            if game.name.localizedCaseInsensitiveContains("steam") || game.executableRelativePath.localizedCaseInsensitiveContains("steam") {
+            if !game.isInstaller && SteamDisplayOptions.isClient(game.executableRelativePath) {
                 Button {
                     Task { await viewModel.discoverSteamGames(in: game.bottleID) }
                 } label: {
@@ -387,42 +354,44 @@ struct GameListRowView: View {
 
                 Divider()
 
-                Menu("Steam Display / Mode") {
-                    Button("Safe Graphics (Fix CEF Black Screen)") {
-                        Task {
-                            await viewModel.setGameArguments(
-                                for: game.id,
-                                arguments: ["-cef-disable-gpu", "-cef-disable-gpu-compositing", "-cef-disable-d3d11", "-no-cef-sandbox"]
-                            )
-                        }
-                    }
+                SteamDisplayMenu(viewModel: viewModel, game: game)
+            }
+        }
+    }
+}
 
-                    Button("Small Mode (No Browser / Minimal List)") {
-                        Task {
-                            await viewModel.setGameArguments(
-                                for: game.id,
-                                arguments: ["-no-browser", "+open", "steam://open/minigameslist"]
-                            )
-                        }
-                    }
+private struct SteamDisplayMenu: View {
+    let viewModel: AppViewModel
+    let game: GameItem
 
-                    Button("Big Picture / Gamepad Mode") {
-                        Task {
-                            await viewModel.setGameArguments(
-                                for: game.id,
-                                arguments: ["-gamepadui"]
-                            )
-                        }
-                    }
-
-                    Button("Standard Mode") {
-                        Task {
-                            await viewModel.setGameArguments(for: game.id, arguments: [])
-                        }
-                    }
+    var body: some View {
+        Menu("Steam Display / Mode") {
+            Button("Standard Mode") { setArguments([]) }
+            Button("Software rendering") { setArguments(SteamDisplayOptions.softwareRendering) }
+            Button("Big Picture / Gamepad Mode") { setArguments(["-gamepadui"]) }
+            Button("Small Mode (No Browser / Minimal List)") {
+                setArguments(["-no-browser", "+open", "steam://open/minigameslist"])
+            }
+        }
+        if let logs = logsDirectory {
+            Button("Show Steam logs in Finder") {
+                if !NSWorkspace.shared.open(logs) {
+                    viewModel.showError("Steam has not created a logs folder here yet.")
                 }
             }
         }
+    }
+
+    private func setArguments(_ arguments: [String]) {
+        Task { await viewModel.setGameArguments(for: game.id, arguments: arguments) }
+    }
+
+    private var logsDirectory: URL? {
+        guard let bottle = viewModel.bottles.first(where: { $0.id == game.bottleID }) else { return nil }
+        let client = game.isExternalExecutable
+            ? URL(fileURLWithPath: game.executableRelativePath)
+            : URL(fileURLWithPath: bottle.directoryPath).appendingPathComponent(game.executableRelativePath)
+        return client.deletingLastPathComponent().appendingPathComponent("logs", isDirectory: true)
     }
 }
 

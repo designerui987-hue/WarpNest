@@ -244,13 +244,7 @@ public actor LibraryService {
         if let args = newArguments {
             game.arguments = args
         } else if !isInstaller {
-            // When converting installer to app, strip installer flags (/S)
-            // If Steam, apply default Wine CEF hardware-acceleration bypass flags
-            if newExecutableRelativePath.localizedCaseInsensitiveContains("steam.exe") {
-                game.arguments = ["-cef-disable-gpu", "-cef-disable-gpu-compositing", "-no-cef-sandbox"]
-            } else {
-                game.arguments = []
-            }
+            game.arguments = []
         }
 
         games[id] = game
@@ -352,19 +346,7 @@ public actor LibraryService {
             }
         }
 
-        var launchArgs = game.arguments
-        if game.executableRelativePath.localizedCaseInsensitiveContains("steam.exe") {
-            launchArgs = launchArgs.filter { $0 != "/S" && $0 != "/s" }
-            if launchArgs.isEmpty {
-                launchArgs = ["-cef-disable-gpu", "-cef-disable-gpu-compositing", "-cef-disable-d3d11", "-no-cef-sandbox"]
-            }
-            if launchArgs != game.arguments {
-                var updatedGame = game
-                updatedGame.arguments = launchArgs
-                games[id] = updatedGame
-                try? await persistGames()
-            }
-        }
+        let launchArgs = SteamDisplayOptions.launchArguments(path: resolvedExeURL.path, saved: game.arguments)
 
         let execPlan: (executableURL: URL, arguments: [String], environment: [String: String])
         do {
