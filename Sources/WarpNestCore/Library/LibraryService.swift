@@ -352,12 +352,26 @@ public actor LibraryService {
             }
         }
 
+        var launchArgs = game.arguments
+        if game.executableRelativePath.localizedCaseInsensitiveContains("steam.exe") {
+            launchArgs = launchArgs.filter { $0 != "/S" && $0 != "/s" }
+            if launchArgs.isEmpty {
+                launchArgs = ["-cef-disable-gpu", "-cef-disable-gpu-compositing", "-cef-disable-d3d11", "-no-cef-sandbox"]
+            }
+            if launchArgs != game.arguments {
+                var updatedGame = game
+                updatedGame.arguments = launchArgs
+                games[id] = updatedGame
+                try? await persistGames()
+            }
+        }
+
         let execPlan: (executableURL: URL, arguments: [String], environment: [String: String])
         do {
             execPlan = try adapter.buildExecutionPlan(
                 prefixURL: bottleURL,
                 executablePath: resolvedExeURL.path,
-                arguments: game.arguments,
+                arguments: launchArgs,
                 configuration: bottle.configuration
             )
         } catch {

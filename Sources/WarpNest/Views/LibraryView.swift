@@ -310,7 +310,7 @@ struct GameCardView: View {
                         Task {
                             await viewModel.setGameArguments(
                                 for: game.id,
-                                arguments: ["-cef-disable-gpu", "-cef-disable-gpu-compositing", "-no-cef-sandbox"]
+                                arguments: ["-cef-disable-gpu", "-cef-disable-gpu-compositing", "-cef-disable-d3d11", "-no-cef-sandbox"]
                             )
                         }
                     }
@@ -320,6 +320,15 @@ struct GameCardView: View {
                             await viewModel.setGameArguments(
                                 for: game.id,
                                 arguments: ["-no-browser", "+open", "steam://open/minigameslist"]
+                            )
+                        }
+                    }
+
+                    Button("Big Picture / Gamepad Mode") {
+                        Task {
+                            await viewModel.setGameArguments(
+                                for: game.id,
+                                arguments: ["-gamepadui"]
                             )
                         }
                     }
@@ -383,7 +392,7 @@ struct GameListRowView: View {
                         Task {
                             await viewModel.setGameArguments(
                                 for: game.id,
-                                arguments: ["-cef-disable-gpu", "-cef-disable-gpu-compositing", "-no-cef-sandbox"]
+                                arguments: ["-cef-disable-gpu", "-cef-disable-gpu-compositing", "-cef-disable-d3d11", "-no-cef-sandbox"]
                             )
                         }
                     }
@@ -393,6 +402,15 @@ struct GameListRowView: View {
                             await viewModel.setGameArguments(
                                 for: game.id,
                                 arguments: ["-no-browser", "+open", "steam://open/minigameslist"]
+                            )
+                        }
+                    }
+
+                    Button("Big Picture / Gamepad Mode") {
+                        Task {
+                            await viewModel.setGameArguments(
+                                for: game.id,
+                                arguments: ["-gamepadui"]
                             )
                         }
                     }
