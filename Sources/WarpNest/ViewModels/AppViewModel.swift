@@ -4,7 +4,7 @@ import WarpNestCore
 @Observable
 @MainActor
 public final class AppViewModel {
-    public var selectedTab: SidebarSection = .library
+    public var selectedTab: SidebarSection = .discover
     public var games: [GameItem] = []
     public var bottles: [Bottle] = []
     public var registeredRuntimes: [RuntimeDescriptor] = []
@@ -28,6 +28,9 @@ public final class AppViewModel {
     public var showingSteamInstallSheet: Bool = false
     public var discoveredSteamGames: [DiscoveredSteamGame] = []
     public var showingSteamDiscoverySheet: Bool = false
+    var transfers: [CatalogTitle: CatalogTransfer] = [:]
+    var transferTasks: [CatalogTitle: Task<Void, Never>] = [:]
+    var lastSteamTarget: BottleID?
     private var steamInstallTask: Task<Void, Never>? = nil
 
     public struct InstallerHandoff: Identifiable, Sendable, Equatable {
@@ -317,13 +320,15 @@ public final class AppViewModel {
 
     public func checkInstallerHandoff(for gameID: GameID) async {
         guard let game = games.first(where: { $0.id == gameID }), game.isInstaller else { return }
-        if let detected = await libraryService.locateInstalledExecutable(named: "Steam.exe", for: gameID) {
+        let filename = URL(fileURLWithPath: game.executableRelativePath).lastPathComponent
+        let product = CatalogTitle.allCases.first { $0.installerName.caseInsensitiveCompare(filename) == .orderedSame }
+        if let product, let detected = await libraryService.locateInstalledExecutable(named: product.executableName, for: gameID) {
             self.pendingInstallerHandoff = InstallerHandoff(
                 id: gameID,
                 gameName: game.name,
                 bottleID: game.bottleID,
                 detectedExecutablePath: detected,
-                detectedExecutableName: "Steam.exe"
+                detectedExecutableName: product.executableName
             )
             self.failedInstallerGameID = nil
         } else {
@@ -433,10 +438,17 @@ public final class AppViewModel {
     }
 
     public func startSteamInstall(targetBottleID: BottleID? = nil) {
-        steamInstallTask?.cancel()
+        guard steamInstallTask == nil else { return }
+        lastSteamTarget = targetBottleID
+        isInstallingSteam = true
+        steamInstallBytesReceived = 0
+        steamInstallTotalBytes = 0
         steamInstallTask = Task { [weak self] in
             guard let self else { return }
-            self.isInstallingSteam = true
+            defer {
+                self.isInstallingSteam = false
+                self.steamInstallTask = nil
+            }
             self.steamInstallProgress = 0.0
             self.steamInstallError = nil
             self.steamInstallStatus = "Preparing installation..."
@@ -444,16 +456,15 @@ public final class AppViewModel {
             do {
                 // 1. Resolve or create target bottle
                 let bottle: Bottle
-                if let targetID = targetBottleID, let found = bottles.first(where: { $0.id == targetID }) {
+                if let targetID = targetBottleID, let found = realBottles.first(where: { $0.id == targetID }) {
                     bottle = found
-                } else if let existingSteamBottle = bottles.first(where: { $0.name.localizedCaseInsensitiveCompare("Steam") == .orderedSame }) {
+                } else if let missing = targetBottleID {
+                    throw BottleServiceError.bottleNotFound(missing)
+                } else if let existingSteamBottle = realBottles.first(where: { $0.name.localizedCaseInsensitiveCompare("Steam") == .orderedSame }) {
                     bottle = existingSteamBottle
                 } else {
                     self.steamInstallStatus = "Creating dedicated Steam bottle..."
-                    let validRuntimes = registeredRuntimes.filter {
-                        $0.isVerified && (!$0.isSimulation || appSettings.developerModeEnabled)
-                    }
-                    guard let runtime = validRuntimes.first else {
+                    guard let runtime = realRuntimes.first else {
                         throw BottleServiceError.runtimeNotFound(RuntimeID("default"))
                     }
                     let config = BottleConfiguration(
@@ -480,7 +491,8 @@ public final class AppViewModel {
                     to: destinationURL,
                     onProgress: { [weak self] received, total, fraction in
                         Task { @MainActor [weak self] in
-                            guard let self else { return }
+                            guard let self, self.isInstallingSteam, !Task.isCancelled,
+                                  self.steamInstallStatus.hasPrefix("Downloading") else { return }
                             self.steamInstallBytesReceived = received
                             self.steamInstallTotalBytes = total
                             self.steamInstallProgress = fraction
@@ -517,8 +529,7 @@ public final class AppViewModel {
                 // 4. Launch silent installer inside the prefix
                 self.steamInstallStatus = "Running Steam setup..."
                 self.showingSteamInstallSheet = false
-                self.isInstallingSteam = false
-
+                try Task.checkCancellation()
                 try await libraryService.launchGame(id: installerGame.id)
                 await reloadData()
 
@@ -527,16 +538,18 @@ public final class AppViewModel {
                 self.steamInstallStatus = "Installation cancelled."
             } catch {
                 self.isInstallingSteam = false
-                self.steamInstallError = error.localizedDescription
-                self.steamInstallStatus = "Installation failed."
+                if Task.isCancelled {
+                    self.steamInstallStatus = "Installation cancelled."
+                } else {
+                    self.steamInstallError = error.localizedDescription
+                    self.steamInstallStatus = "Installation failed."
+                }
             }
         }
     }
 
     public func cancelSteamInstall() {
         steamInstallTask?.cancel()
-        steamInstallTask = nil
-        isInstallingSteam = false
         steamInstallStatus = "Installation cancelled."
         showingSteamInstallSheet = false
     }
@@ -572,7 +585,9 @@ public final class AppViewModel {
 }
 
 public enum SidebarSection: String, CaseIterable, Identifiable {
+    case discover = "Discover"
     case library = "Library"
+    case downloads = "Downloads"
     case bottles = "Environments"
     case diagnostics = "Diagnostics"
     case settings = "Settings"
@@ -580,7 +595,9 @@ public enum SidebarSection: String, CaseIterable, Identifiable {
     public var id: String { rawValue }
     public var iconName: String {
         switch self {
-        case .library: return "gamecontroller.fill"
+        case .discover: return "safari"
+        case .library: return "square.grid.2x2"
+        case .downloads: return "arrow.down.circle"
         case .bottles: return "shippingbox.fill"
         case .diagnostics: return "waveform.path.ecg"
         case .settings: return "gearshape.fill"

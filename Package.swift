@@ -27,7 +27,8 @@ let package = Package(
         .executableTarget(
             name: "WarpNest",
             dependencies: ["WarpNestCore"],
-            path: "Sources/WarpNest"
+            path: "Sources/WarpNest",
+            resources: [.process("Resources")]
         ),
         .testTarget(
             name: "WarpNestCoreTests",

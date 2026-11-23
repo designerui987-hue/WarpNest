@@ -48,6 +48,10 @@ struct SteamInstallerHandoffTests {
         let steamExeURL = steamInstallDir.appendingPathComponent("steam.exe")
         try "MZ-MOCK-STEAM-CLIENT-EXE".data(using: .utf8)?.write(to: steamExeURL)
 
+        // An existing Steam client must never be offered as another product's installed executable.
+        let otherTarget = await bottleService.locateInstalledExecutable(named: "7zFM.exe", in: bottle.id)
+        #expect(otherTarget == nil)
+
         try await libraryService.launchGame(id: installerGame.id)
         while await libraryService.getSessionState(for: installerGame.id) != .stopped {
             try await Task.sleep(nanoseconds: 10_000_000)

@@ -25,14 +25,7 @@ struct LibraryView: View {
         let simulations = Set(viewModel.bottles.filter { $0.runtimeID == .simulation }.map(\.id))
         VStack(spacing: 0) {
             HStack(spacing: 12) {
-                HStack {
-                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary).accessibilityHidden(true)
-                    TextField("Search games and apps", text: $viewModel.searchQuery)
-                        .textFieldStyle(.plain)
-                }
-                .padding(7)
-                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
-                .frame(maxWidth: 320)
+                Text("Your library").font(.title2.bold())
                 Spacer()
                 Picker("Library layout", selection: $viewModel.isGridView) {
                     Label("Grid", systemImage: "square.grid.2x2").tag(true)
@@ -43,13 +36,8 @@ struct LibraryView: View {
                 .pickerStyle(.segmented)
                 .frame(width: 80)
                 if !viewModel.games.isEmpty {
-                    Button(action: { viewModel.openSteamInstaller() }) {
-                        Label("Install Steam", systemImage: "arrow.down.circle")
-                    }
-                    .buttonStyle(.bordered)
-
                     Button(action: openSetupOrAdd) { Label("Add game or app", systemImage: "plus") }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.bordered)
                 }
             }
             .padding()
@@ -60,8 +48,8 @@ struct LibraryView: View {
                         .foregroundColor(.green)
                         .font(.title2)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Steam Installation Detected").bold()
-                        Text("Found Steam.exe at: \(handoff.detectedExecutablePath)")
+                        Text("Installed app found").bold()
+                        Text(handoff.detectedExecutablePath)
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -70,9 +58,9 @@ struct LibraryView: View {
                         viewModel.cancelInstallerHandoff()
                     }
                     .buttonStyle(.borderless)
-                    Button("Confirm Steam") {
+                    Button("Use installed app") {
                         Task {
-                            try? await viewModel.confirmInstallerHandoff(for: handoff.id, targetPath: handoff.detectedExecutablePath)
+                            try? await viewModel.confirmInstallerHandoff(for: handoff.id, targetPath: handoff.detectedExecutablePath, newName: CatalogTitle.name(forExecutable: handoff.detectedExecutableName))
                         }
                     }
                     .buttonStyle(.borderedProminent)
@@ -87,7 +75,7 @@ struct LibraryView: View {
                         .foregroundColor(.orange)
                         .font(.title2)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Setup Ended: Steam.exe Not Found").bold()
+                        Text("Choose the app installed by \(failedGame.name)").bold()
                         Text("The environment and files were preserved.")
                             .font(.caption)
                             .foregroundColor(.secondary)
@@ -140,7 +128,7 @@ struct LibraryView: View {
                 }
             } else if viewModel.isGridView {
                 ScrollView {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 200, maximum: 300), spacing: 16)], spacing: 16) {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 18)], spacing: 22) {
                         ForEach(matches) { game in GameCardView(viewModel: viewModel, game: game, simulated: simulations.contains(game.bottleID)) }
                     }
                     .padding(20)
@@ -154,7 +142,7 @@ struct LibraryView: View {
             AddShortcutSheet(viewModel: viewModel, bottles: availableBottles)
         }
         .sheet(isPresented: $viewModel.showingSteamInstallSheet) {
-            SteamInstallSheet(viewModel: viewModel, bottles: availableBottles)
+            SteamInstallSheet(viewModel: viewModel, bottles: viewModel.realBottles)
         }
         .sheet(isPresented: $viewModel.showingSteamDiscoverySheet) {
             SteamDiscoverySheet(viewModel: viewModel)
@@ -285,71 +273,28 @@ struct GameCardView: View {
     let simulated: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(Color.accentColor.opacity(0.15))
-                    .frame(height: 120)
-
-                Image(systemName: "gamecontroller.fill")
-                    .font(.system(size: 40))
-                    .foregroundColor(.accentColor)
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(game.name)
-                    .font(.headline)
-                    .lineLimit(1)
-
-                let state = viewModel.activeSessionStates[game.id] ?? .stopped
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(circleColor(for: state))
-                        .frame(width: 8, height: 8)
-                    if simulated { Text("Simulated").font(.caption) }
-                    if game.isInstaller {
-                        Text("Installer")
-                            .font(.caption2)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
-                            .background(Color.blue.opacity(0.2))
-                            .foregroundColor(.blue)
-                            .cornerRadius(4)
+        let cover = ShelfIdentity(game: game)
+        let state = viewModel.activeSessionStates[game.id] ?? .stopped
+        VStack(alignment: .leading, spacing: 10) {
+            ShelfCover(identity: cover)
+                .frame(height: 106)
+            VStack(alignment: .leading, spacing: 5) {
+                Text(game.name).font(.headline).lineLimit(1)
+                Text([simulated ? "Simulated" : nil, viewModel.bottles.first { $0.id == game.bottleID }?.name].compactMap { $0 }.joined(separator: " · "))
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                HStack {
+                    if state != .stopped {
+                        Text(state.rawValue).font(.caption).foregroundStyle(.secondary)
                     }
-                    Text(state.rawValue)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    Spacer()
+                    ShelfLaunchButton(viewModel: viewModel, game: game)
                 }
             }
-
-            HStack {
-                let state = viewModel.activeSessionStates[game.id] ?? .stopped
-                let isRunning = state == .running || state == .stopFailed
-                let isTransitioning = state == .preparing || state == .stopping
-                let buttonTitle = state == .stopFailed ? "Retry Stop" : (isRunning ? "Stop" : (game.isInstaller ? "Run Setup" : "Play"))
-                let buttonIcon = isRunning ? "stop.fill" : "play.fill"
-
-                Button {
-                    Task {
-                        await viewModel.toggleGameSession(game: game)
-                    }
-                } label: {
-                    Label(buttonTitle, systemImage: buttonIcon)
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(isRunning ? .red : .accentColor)
-                .disabled(isTransitioning)
-                .accessibilityLabel("\(buttonTitle) \(game.name)")
-            }
+            .padding(.horizontal, 12)
+            .padding(.bottom, 12)
         }
-        .padding(12)
-        .background(Color(NSColor.controlBackgroundColor))
-        .cornerRadius(12)
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
-        )
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
         .contextMenu {
             if game.name.localizedCaseInsensitiveContains("steam") || game.executableRelativePath.localizedCaseInsensitiveContains("steam") {
                 Button {
@@ -389,14 +334,7 @@ struct GameCardView: View {
         }
     }
 
-    private func circleColor(for state: SessionState) -> Color {
-        switch state {
-        case .running: return .green
-        case .preparing, .stopping: return .orange
-        case .failed, .stopFailed: return .red
-        case .stopped: return .gray
-        }
-    }
+
 }
 
 struct GameListRowView: View {
@@ -406,9 +344,9 @@ struct GameListRowView: View {
 
     var body: some View {
         HStack(spacing: 16) {
-            Image(systemName: "gamecontroller.fill")
-                .foregroundColor(.accentColor)
-                .frame(width: 28, height: 28)
+            ShelfCover(identity: ShelfIdentity(game: game))
+                .frame(width: 54, height: 38)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(game.name)
@@ -424,23 +362,10 @@ struct GameListRowView: View {
             Spacer()
 
             let state = viewModel.activeSessionStates[game.id] ?? .stopped
-            Text(state.rawValue)
-                .font(.caption)
-                .foregroundColor(.secondary)
-
-            let isRunning = state == .running || state == .stopFailed
-            let isTransitioning = state == .preparing || state == .stopping
-            let buttonTitle = state == .stopFailed ? "Retry Stop" : (isRunning ? "Stop" : (game.isInstaller ? "Run Setup" : "Play"))
-
-            Button(buttonTitle) {
-                Task {
-                    await viewModel.toggleGameSession(game: game)
-                }
+            if state != .stopped {
+                Text(state.rawValue).font(.caption).foregroundStyle(.secondary)
             }
-            .buttonStyle(.bordered)
-            .tint(isRunning ? .red : .accentColor)
-            .disabled(isTransitioning)
-            .accessibilityLabel("\(buttonTitle) \(game.name)")
+            ShelfLaunchButton(viewModel: viewModel, game: game)
         }
         .padding(.vertical, 4)
         .contextMenu {

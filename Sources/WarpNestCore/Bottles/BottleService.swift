@@ -172,7 +172,7 @@ public actor BottleService {
             "drive_c/Program Files/Steam/Steam.exe",
             "drive_c/Program Files/Steam/steam.exe"
         ]
-        for rel in wellKnownCandidates {
+        for rel in wellKnownCandidates where URL(fileURLWithPath: rel).lastPathComponent.lowercased() == targetLower {
             let fullURL = bottleURL.appendingPathComponent(rel)
             if FileManager.default.fileExists(atPath: fullURL.path) {
                 return rel
